@@ -6,7 +6,17 @@ const supabaseKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
   || process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
 export const isRemoteConfigured = Boolean(supabaseUrl && supabaseKey);
-const client = isRemoteConfigured ? createClient(supabaseUrl, supabaseKey) : null;
+const client = isRemoteConfigured
+  ? createClient(supabaseUrl, supabaseKey, {
+    // Lesachi has no user login yet. Avoid auth/session probing in every tab;
+    // all shared data access is intentionally handled by the public RLS key.
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  })
+  : null;
 
 function requireClient() {
   if (!client) {
