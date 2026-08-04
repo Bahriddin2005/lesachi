@@ -5,9 +5,14 @@ const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
   || process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
+function noStoreFetch(input, init = {}) {
+  return fetch(input, { ...init, cache: 'no-store' });
+}
+
 export const isRemoteConfigured = Boolean(supabaseUrl && supabaseKey);
 const client = isRemoteConfigured
   ? createClient(supabaseUrl, supabaseKey, {
+    global: { fetch: noStoreFetch },
     // Lesachi has no user login yet. Avoid auth/session probing in every tab;
     // all shared data access is intentionally handled by the public RLS key.
     auth: {
