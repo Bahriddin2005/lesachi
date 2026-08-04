@@ -1,24 +1,33 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "LESA Ijara",
+    "slug": "lesa-ijara",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/lesachi-logo.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "uz.lesa.ijara"
     },
     "android": {
+      "package": "uz.lesa.ijara",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/lesachi-logo.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       }
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "bundler": "metro",
+      "favicon": "./assets/lesachi-logo.png",
+      "themeColor": "#2563EB",
+      "description": "Qurilish anjomlari ijarasini boshqarish ilovasi"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-sharing"
+    ]
   }
 }
