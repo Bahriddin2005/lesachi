@@ -11,7 +11,7 @@ const pwaSourceDir = join(projectRoot, 'public');
 rmSync(outputDir, { recursive: true, force: true });
 mkdirSync(outputDir, { recursive: true });
 
-execFileSync('npx', ['expo', 'export', '--platform', 'web', '--output-dir', outputDir], {
+execFileSync('npx', ['expo', 'export', '--clear', '--platform', 'web', '--output-dir', outputDir], {
   cwd: projectRoot,
   stdio: 'inherit',
 });
