@@ -125,11 +125,11 @@ export async function fetchRentals() {
     unwrap(db.from('rental_items').select('*').gt('quantity', 0).order('rental_id').order('id')),
   ]);
   if (typeof console !== 'undefined' && console.debug) {
-    console.debug('[Lesachi] remote rentals loaded', {
+    console.debug('[Lesachi] remote rentals loaded ' + JSON.stringify({
       rentals: rentals?.length || 0,
       customers: customers?.length || 0,
       items: items?.length || 0,
-    });
+    }));
   }
   const customerById = new Map((customers || []).map((row) => [row.id, row]));
   const itemsByRental = (items || []).reduce((map, row) => {
