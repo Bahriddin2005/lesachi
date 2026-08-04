@@ -318,7 +318,7 @@ function LesaApp({ db }) {
         {screen === 'history' && (
           <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: 'final' } })} />
         )}
-        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} onInventory={() => setScreen('inventory')} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} />}
+        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} onInventory={() => setScreen('inventory')} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
         {screen === 'inventory' && <Inventory equipment={equipment} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen('settings')} onAdd={() => setEquipmentEditor({ mode: 'create', item: null })} onEdit={(item) => setEquipmentEditor({ mode: 'edit', item })} onDelete={handleDeleteEquipment} />}
 
         <BottomNav screen={screen} onChange={setScreen} />
@@ -602,7 +602,11 @@ function EquipmentDeleteModal({ item, error, onClose, onConfirm }) {
   );
 }
 
-function Settings({ channel, onChange, onInventory, onInstallApp, installAvailable, installed }) {
+function Settings({ channel, onChange, onInventory, onInstallApp, installAvailable, installed, remoteMode }) {
+  const storageLabel = remoteMode ? 'Umumiy Supabase bazasi' : 'Qurilma SQLite bazasi';
+  const storageNote = remoteMode
+    ? 'Production rejimida barcha ma’lumotlar umumiy onlayn bazada saqlanadi va boshqa foydalanuvchilarga ko‘rinadi.'
+    : 'Lokal rejimda ma’lumotlar shu qurilmaning o‘zida saqlanadi.';
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.screenContent}>
       <View style={s.topBrand}><Brand /></View>
@@ -613,9 +617,9 @@ function Settings({ channel, onChange, onInventory, onInstallApp, installAvailab
         <View style={s.flex}><Text style={s.settingsTitle}>Ilova versiyasi</Text><Text style={s.settingsText}>{installed ? 'Ilova bosh ekranga o‘rnatilgan.' : installAvailable ? 'O‘rnatish oynasini ochish uchun bosing.' : 'Saytni telefon bosh ekraniga o‘rnating.'}</Text></View>
         <Text style={installS.installArrow}>›</Text>
       </Pressable>
-      <View style={s.settingsCard}><Text style={s.settingsTitle}>Ma’lumotlar</Text><InfoRow label="Saqlash" value="Qurilma SQLite bazasi" /><InfoRow label="Hisoblash" value="Real-time, cron ishlatilmaydi" /><InfoRow label="Versiya" value="1.0.0 MVP" /></View>
+      <View style={s.settingsCard}><Text style={s.settingsTitle}>Ma’lumotlar</Text><InfoRow label="Saqlash" value={storageLabel} /><InfoRow label="Hisoblash" value="Real-time, cron ishlatilmaydi" /><InfoRow label="Versiya" value="1.0.0 MVP" /></View>
       <Pressable style={s.inventoryLink} onPress={onInventory}><View><Text style={s.settingsTitle}>Ombor jadvali</Text><Text style={s.settingsText}>Anjomlar va faol ijaradagi sonlarni ko‘rish</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
-      <View style={s.note}><Text style={s.noteTitle}>Eslatma</Text><Text style={s.noteText}>Ma’lumotlar shu telefonning o‘zida saqlanadi. Production versiyada server backup va real SMS/Telegram/WhatsApp API kalitlari ulanishi kerak.</Text></View>
+      <View style={s.note}><Text style={s.noteTitle}>Eslatma</Text><Text style={s.noteText}>{storageNote} SMS/Telegram/WhatsApp yuborish uchun tegishli API ulanishi kerak.</Text></View>
     </ScrollView>
   );
 }
