@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lesachi-pwa-v4';
+const CACHE_NAME = 'lesachi-pwa-v5';
 const APP_SHELL = [
   './',
   './index.html',
@@ -29,6 +29,11 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+
+  // Never cache Supabase/API responses. They are shared, mutable data and
+  // must always be read from the remote database rather than this PWA shell.
+  const requestUrl = new URL(event.request.url);
+  if (requestUrl.origin !== self.location.origin) return;
 
   // Always revalidate HTML so a new deployment is visible immediately. The
   // cached shell remains the offline fallback when the network is unavailable.
