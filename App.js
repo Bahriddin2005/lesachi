@@ -33,7 +33,7 @@ import {
   registerReturn,
   setSetting,
   updateEquipmentType,
-} from './src/database';
+} from './src/data';
 import {
   currentDebt,
   dayCount,
@@ -76,15 +76,22 @@ const C = {
 };
 
 export default function App() {
+  if (Platform.OS === 'web') {
+    return <LesaApp db={null} />;
+  }
   return (
     <SQLiteProvider databaseName="lesa.db" onInit={migrateDatabase}>
-      <LesaApp />
+      <NativeLesaApp />
     </SQLiteProvider>
   );
 }
 
-function LesaApp() {
+function NativeLesaApp() {
   const db = useSQLiteContext();
+  return <LesaApp db={db} />;
+}
+
+function LesaApp({ db }) {
   const [screen, setScreen] = useState('home');
   const [rentals, setRentals] = useState([]);
   const [equipment, setEquipment] = useState([]);

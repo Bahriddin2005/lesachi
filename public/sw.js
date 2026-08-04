@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lesachi-pwa-v3';
+const CACHE_NAME = 'lesachi-pwa-v4';
 const APP_SHELL = [
   './',
   './index.html',

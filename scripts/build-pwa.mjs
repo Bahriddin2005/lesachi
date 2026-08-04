@@ -57,7 +57,7 @@ const serviceWorkerRegistration = `
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js?v=3').catch(() => {});
+      navigator.serviceWorker.register('./sw.js?v=4').catch(() => {});
       });
     }
   </script>`;
