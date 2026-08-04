@@ -644,7 +644,7 @@ function BottomNav({ screen, onChange }) {
   return <View style={s.bottomNav}>
     <NavButton active={screen === 'home'} icon="home-variant-outline" activeIcon="home-variant" label="Asosiy" onPress={() => onChange('home')} />
     <NavButton active={screen === 'customers'} icon="account-group-outline" activeIcon="account-group" label="Mijozlar" onPress={() => onChange('customers')} />
-    <NavButton active={screen === 'inventory'} icon="warehouse-outline" activeIcon="warehouse" label="Ombor" onPress={() => onChange('inventory')} />
+    <NavButton active={screen === 'inventory'} icon="warehouse" activeIcon="warehouse" label="Ombor" onPress={() => onChange('inventory')} />
     <NavButton active={screen === 'history'} icon="history" activeIcon="history" label="Tarix" onPress={() => onChange('history')} />
     <NavButton active={screen === 'settings'} icon="cog-outline" activeIcon="cog" label="Sozlama" onPress={() => onChange('settings')} />
   </View>;

@@ -43,6 +43,29 @@ if (existsSync(sqliteWasmDir) && existsSync(webBundleDir)) {
   }
 }
 
+// Vercel's static uploader skips nested `node_modules` directories. Expo
+// Vector Icons stores its web fonts there, so publish the fonts at a regular
+// asset path and rewrite the generated bundle references accordingly.
+const iconFontsDir = join(outputDir, 'assets', 'node_modules', '@expo', 'vector-icons', 'build', 'vendor', 'react-native-vector-icons', 'Fonts');
+const iconFontOutputDir = join(outputDir, 'assets', 'icon-fonts');
+if (existsSync(iconFontsDir) && existsSync(webBundleDir)) {
+  mkdirSync(iconFontOutputDir, { recursive: true });
+  const iconFontNames = readdirSync(iconFontsDir).filter((fileName) => fileName.endsWith('.ttf'));
+  for (const fileName of iconFontNames) {
+    copyFileSync(join(iconFontsDir, fileName), join(iconFontOutputDir, fileName));
+  }
+  for (const bundleFile of readdirSync(webBundleDir)) {
+    if (!bundleFile.endsWith('.js')) continue;
+    const bundlePath = join(webBundleDir, bundleFile);
+    const bundleSource = readFileSync(bundlePath, 'utf8');
+    const patchedSource = bundleSource.replace(
+      /\/assets\/node_modules\/@expo\/vector-icons\/build\/vendor\/react-native-vector-icons\/Fonts\/([^"'`]+\.ttf)/g,
+      '/assets/icon-fonts/$1',
+    );
+    if (patchedSource !== bundleSource) writeFileSync(bundlePath, patchedSource);
+  }
+}
+
 const indexPath = join(outputDir, 'index.html');
 let indexHtml = readFileSync(indexPath, 'utf8').replace('<html lang="en">', '<html lang="uz">');
 
