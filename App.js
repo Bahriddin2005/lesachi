@@ -33,6 +33,7 @@ import {
   registerReturn,
   setSetting,
   updateEquipmentType,
+  usesRemoteDatabase,
 } from './src/data';
 import {
   currentDebt,
@@ -76,7 +77,7 @@ const C = {
 };
 
 export default function App() {
-  if (Platform.OS === 'web') {
+  if (Platform.OS === 'web' && usesRemoteDatabase) {
     return <LesaApp db={null} />;
   }
   return (
