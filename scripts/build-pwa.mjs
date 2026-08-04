@@ -16,7 +16,7 @@ execFileSync('npx', ['expo', 'export', '--platform', 'web', '--output-dir', outp
   stdio: 'inherit',
 });
 
-for (const fileName of ['manifest.json', 'sw.js', 'icon-192.png', 'icon-512.png']) {
+for (const fileName of ['manifest.json', 'sw.js', 'icon-192.png', 'icon-512.png', 'vercel.json']) {
   copyFileSync(join(pwaSourceDir, fileName), join(outputDir, fileName));
 }
 
