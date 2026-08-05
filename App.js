@@ -33,6 +33,8 @@ import {
   logSentMessage,
   markRentalItemPaid,
   migrateDatabase,
+  recordRentalPayment,
+  registerReturn,
   setSetting,
   queueSms,
   updateSmsQueue,
@@ -48,7 +50,9 @@ import {
   isClosed,
   itemTotal,
   openQuantity,
+  paidItemAmount,
   paidTotal,
+  pendingItemAmount,
   receiptBreakdown,
   receiptCalculationText,
   receiptSmsText,
@@ -278,12 +282,52 @@ function LesaApp({ db }) {
     }
   };
 
+  const submitReceiptReturn = async (rental, returns) => {
+    try {
+      const outcome = await registerReturn(db, rental.id, returns);
+      const rows = await load(true);
+      const updated = rows.find((row) => row.id === rental.id);
+      if (!updated) throw new Error('Yangilangan ijara topilmadi.');
+      const returnType = outcome.wasClosed ? 'final' : 'partial';
+      await enqueueSms({
+        rentalId: updated.id,
+        phone: updated.phone,
+        message: receiptSmsText(updated, {
+          type: returnType,
+          returnedItemIds: outcome.returnedRows.map((item) => item.id),
+        }),
+      });
+      setReceipt({ rental: updated, context: outcome.receipt });
+      return { ok: true, rental: updated, outcome };
+    } catch (error) {
+      return { ok: false, error: error.message || 'Qaytarishni saqlab bo‘lmadi.' };
+    }
+  };
+
+  const submitReceiptPayment = async (rental, amount) => {
+    try {
+      const payment = await recordRentalPayment(db, rental.id, amount, 'Admin');
+      const rows = await load(true);
+      const updated = rows.find((row) => row.id === rental.id);
+      if (!updated) throw new Error('Yangilangan ijara topilmadi.');
+      setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      return { ok: true, rental: updated, payment };
+    } catch (error) {
+      return { ok: false, error: error.message || 'To‘lovni saqlab bo‘lmadi.' };
+    }
+  };
+
   const confirmPaid = async (itemId) => {
     try {
       await markRentalItemPaid(db, itemId);
       const markPaid = (rental) => {
         if (!rental?.items?.some((item) => item.id === itemId)) return rental;
-        return { ...rental, items: rental.items.map((item) => item.id === itemId ? { ...item, paid: true } : item) };
+        return {
+          ...rental,
+          items: rental.items.map((item) => item.id === itemId
+            ? { ...item, paid: true, paidAmount: lineAmount(rental, item) }
+            : item),
+        };
       };
       setRentals((rows) => rows.map(markPaid));
       setSelected((current) => current ? markPaid(current) : current);
@@ -511,6 +555,8 @@ function LesaApp({ db }) {
         onPrint={printRentalReceipt}
         onSms={smsReceipt}
         onShare={shareReceipt}
+        onReturn={submitReceiptReturn}
+        onPayment={submitReceiptPayment}
       />
     </SafeAreaView>
   );
@@ -542,15 +588,17 @@ function returnedItems(rental) {
 }
 
 function pendingPaymentItems(rental) {
-  return returnedItems(rental).filter((item) => !item.paid);
+  return returnedItems(rental).filter((item) => pendingItemAmount(rental, item) > 0);
 }
 
 function paidReturnedItems(rental) {
-  return returnedItems(rental).filter((item) => item.paid);
+  return returnedItems(rental).filter((item) => (
+    paidItemAmount(rental, item) > 0 && pendingItemAmount(rental, item) === 0
+  ));
 }
 
 function pendingPaymentTotal(rental) {
-  return pendingPaymentItems(rental).reduce((total, item) => total + lineAmount(rental, item), 0);
+  return pendingPaymentItems(rental).reduce((total, item) => total + pendingItemAmount(rental, item), 0);
 }
 
 function quantityOf(items) {
@@ -893,7 +941,7 @@ function Payments({ rentals, refreshing, onRefresh, onBack, onPay, onRental }) {
                 <Text style={s.paymentItemName}>{item.name} × {item.quantity}</Text>
                 <Text style={s.paymentItemMeta}>Qaytdi: {formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun</Text>
               </View>
-              <Text style={s.paymentItemAmount}>{formatMoney(lineAmount(rental, item))}</Text>
+              <Text style={s.paymentItemAmount}>{formatMoney(pendingItemAmount(rental, item))}</Text>
             </View>
             <Pressable style={s.paymentApproveButton} onPress={() => openConfirmation(rental, item)}>
               <MaterialCommunityIcons name="cash-check" size={25} color={C.white} />
@@ -910,7 +958,7 @@ function Payments({ rentals, refreshing, onRefresh, onBack, onPay, onRental }) {
 }
 
 function PaymentConfirmModal({ target, busy, error, onClose, onConfirm }) {
-  const amount = target ? lineAmount(target.rental, target.item) : 0;
+  const amount = target ? pendingItemAmount(target.rental, target.item) : 0;
   return <Modal visible={Boolean(target)} transparent animationType="fade" onRequestClose={onClose}>
     <View style={s.paymentConfirmOverlay}>
       <View style={s.paymentConfirmCard}>
@@ -1122,6 +1170,7 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
   const activeItems = rental ? openItems(rental) : [];
   const pendingItems = rental ? pendingPaymentItems(rental) : [];
   const paidItems = rental ? paidReturnedItems(rental) : [];
+  const activity = Array.isArray(rental?.activity) ? rental.activity : [];
   const activeQuantity = quantityOf(activeItems);
   const [paymentTarget, setPaymentTarget] = useState(null);
   const [paymentBusy, setPaymentBusy] = useState(false);
@@ -1175,7 +1224,7 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
     {pendingItems.length > 0 && <>
       <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>To‘lov kutilmoqda</Text><Text style={[s.paidSectionTotal, { color: C.orange }]}>{formatMoney(pendingPaymentTotal(rental))}</Text></View>
       {pendingItems.map((item) => <View key={item.id} style={[s.returnHistoryItem, s.pendingPaymentCard]}>
-        <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>↩ {item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>{formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · to‘lov kutilmoqda</Text></View><Text style={[s.returnHistoryAmount, { color: C.orange }]}>{formatMoney(lineAmount(rental, item))}</Text></View>
+        <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>↩ {item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>{formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · {paidItemAmount(rental, item) > 0 ? `${formatMoney(paidItemAmount(rental, item))} qisman to‘landi` : 'to‘lov kutilmoqda'}</Text></View><Text style={[s.returnHistoryAmount, { color: C.orange }]}>{formatMoney(pendingItemAmount(rental, item))}</Text></View>
         <View style={s.pendingPaymentFooter}><Text style={[s.paidBadgeText, { color: C.green2 }]}>BUYUM QAYTDI</Text><Pressable style={s.paidConfirmButton} onPress={() => { setPaymentError(''); setPaymentTarget({ rental, item }); }}><Text style={s.paidConfirmText}>To‘landi</Text></Pressable></View>
       </View>)}
     </>}
@@ -1186,6 +1235,14 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
         <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>✓ {item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>{formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun</Text></View><Text style={[s.returnHistoryAmount, { color: C.successDark }]}>{formatMoney(lineAmount(rental, item))}</Text></View>
         <View style={s.paidBadge}><Text style={[s.paidBadgeText, { color: C.successDark }]}>TO‘LANDI</Text></View>
       </View>)}
+    </>}
+
+    {activity.length > 0 && <>
+      <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>Amallar tarixi</Text><Text style={s.detailSectionCount}>{activity.length} ta amal</Text></View>
+      <View style={s.activityCard}>{activity.map((event) => <View key={event.id} style={s.activityRow}>
+        <View style={[s.activityIcon, event.type === 'payment' ? s.activityIconPayment : s.activityIconReturn]}><MaterialCommunityIcons name={event.type === 'payment' ? 'cash-check' : 'package-down'} size={23} color={event.type === 'payment' ? C.successDark : C.orange} /></View>
+        <View style={s.flex}><Text style={s.activityTitle}>{event.type === 'payment' ? `To‘lov: ${formatMoney(event.amount)}` : `Qaytarildi: ${event.quantity} dona`}</Text><Text style={s.activityMeta}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>
+      </View>)}</View>
     </>}
 
     <Pressable style={s.returnButton} onPress={onEdit}><Text style={s.returnButtonText}>Tahrirlash</Text></Pressable>
@@ -1329,8 +1386,10 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   </>}</KeyboardAvoidingView></View></Modal>;
 }
 
-function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, onShare }) {
+function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, onShare, onReturn, onPayment }) {
   const [busy, setBusy] = useState(null);
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [paymentOpen, setPaymentOpen] = useState(false);
   const rental = receipt?.rental;
   const context = receipt?.context || { type: 'current' };
   const breakdown = rental ? receiptBreakdown(rental, context) : null;
@@ -1344,14 +1403,20 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
   const returnedTotal = breakdown?.returnedTotal ?? 0;
   const current = breakdown?.currentDebt ?? 0;
   const final = breakdown?.finalTotal ?? rentalTotal(rental || { items: [] });
-  const pendingReturned = returned.filter((item) => !item.paid);
+  const pendingReturned = returned.filter((item) => item.outstandingAmount > 0);
+  const returnedOutstanding = pendingReturned.reduce((sum, item) => sum + item.outstandingAmount, 0);
+  const returnedPaid = returned.reduce((sum, item) => sum + item.paidAmount, 0);
+  const allPending = rental ? pendingPaymentTotal(rental) : 0;
+  const allPaid = rental ? paidTotal(rental) : 0;
+  const returnableItems = rental ? openItems(rental) : [];
+  const activity = Array.isArray(rental?.activity) ? rental.activity : [];
   const title = isEdit ? 'Ijara o‘zgarishi cheki' : isPartial ? 'Qisman qaytarish cheki' : isFinal ? 'Yakuniy chek' : type === 'new' ? 'Yangi ijara cheki' : 'Joriy elektron chek';
   useEffect(() => setBusy(null), [rental?.id, type, context.returnedItemIds?.join(','), context.addedItemIds?.join(',')]);
   const run = async (name, action) => {
     setBusy(name);
     try { await action(receipt); } finally { setBusy(null); }
   };
-  return <Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
+  return <><Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
     <ModalHeader title={title} subtitle={isEdit ? 'Qaytarish va qo‘shimcha anjomlar' : isPartial ? 'Qaytarilgan qism bo‘yicha to‘lov' : isFinal ? 'Barcha anjomlar qaytarilgan' : 'Hisob real vaqtda yangilanadi'} onClose={onClose} />
     <View style={s.receiptPaper}>
       <View style={s.receiptHead}><Brand /><Text style={s.receiptNumber}>#{rental.id.slice(-8).toUpperCase()}</Text></View>
@@ -1359,7 +1424,7 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
 
       {returned.length > 0 && <>
         <Text style={s.receiptSectionTitle}>{isPartial ? 'QAYTARILGAN QISM' : 'QAYTARILGAN ANJOMLAR'}</Text>
-        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>{item.paid ? '✓' : '◷'} {item.name}</Text><Text style={s.receiptItemSub}>{receiptCalculationText(item)} · {item.paid ? 'TO‘LANDI' : 'TO‘LOV KUTILMOQDA'}</Text></View></View>)}
+        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>{item.paid ? '✓' : item.paidAmount > 0 ? '◐' : '◷'} {item.name}</Text><Text style={s.receiptItemSub}>{receiptCalculationText(item)} · {item.paid ? 'TO‘LANDI' : item.paidAmount > 0 ? `${formatMoney(item.paidAmount)} TO‘LANDI · ${formatMoney(item.outstandingAmount)} QOLDI` : 'TO‘LOV KUTILMOQDA'}</Text></View></View>)}
       </>}
 
       {isEdit && added.length > 0 && <>
@@ -1374,13 +1439,107 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
         {isPartial && <Text style={s.receiptReminder}>Qolgan {quantityOf(remaining)} dona anjom qaytarilmaguncha, kunlik hisob davom etadi.</Text>}
       </View>}
 
-      {(isPartial || isEdit) && returned.length > 0 && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>{pendingReturned.length ? 'TO‘LOV KUTILMOQDA' : 'QAYTARILGAN QISM TO‘LANDI'}</Text><Text style={[s.receiptGrandValue, { color: pendingReturned.length ? C.orange : C.successDark }]}>{formatMoney(returnedTotal)}</Text></View>}
-      {isFinal && (pendingReturned.length ? <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>TO‘LOV KUTILMOQDA</Text><Text style={[s.receiptGrandValue, { color: C.orange }]}>{formatMoney(pendingReturned.reduce((sum, item) => sum + lineAmount(rental, item), 0))}</Text></View> : <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>YAKUNIY JAMI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(final)}</Text></View>)}
+      {(isPartial || isEdit) && returned.length > 0 && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>{returnedOutstanding ? returnedPaid > 0 ? 'QISMAN TO‘LANDI · QOLDI' : 'TO‘LOV KUTILMOQDA' : 'QAYTARILGAN QISM TO‘LANDI'}</Text><Text style={[s.receiptGrandValue, { color: returnedOutstanding ? C.orange : C.successDark }]}>{formatMoney(returnedOutstanding || returnedTotal)}</Text></View>}
+      {isFinal && (allPending ? <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>{allPaid > 0 ? 'QISMAN TO‘LANDI · QOLDI' : 'TO‘LOV KUTILMOQDA'}</Text><Text style={[s.receiptGrandValue, { color: C.orange }]}>{formatMoney(allPending)}</Text></View> : <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>TO‘LANDI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(allPaid || final)}</Text></View>)}
       {!isPartial && !isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>JORIY QARZ</Text><Text style={[s.receiptGrandValue, { color: C.redDark }]}>{formatMoney(current)}</Text></View>}
+      {!isPartial && !isFinal && returned.length > 0 && <View style={[s.receiptGrand, { borderTopColor: allPending ? C.orange : C.success }]}><Text style={s.receiptGrandLabel}>{allPending ? allPaid > 0 ? 'QISMAN TO‘LANDI · QOLDI' : 'TO‘LOV KUTILMOQDA' : 'TO‘LANDI'}</Text><Text style={[s.receiptGrandValue, { color: allPending ? C.orange : C.successDark }]}>{formatMoney(allPending || allPaid)}</Text></View>}
+
+      {activity.length > 0 && <View style={s.receiptActivity}><Text style={s.receiptSectionTitle}>AMALLAR TARIXI</Text>{activity.map((event) => <View key={event.id} style={s.receiptActivityRow}><Text style={s.receiptActivityTitle}>{event.type === 'payment' ? `TO‘LOV · ${formatMoney(event.amount)}` : `QAYTARILDI · ${event.quantity} dona`}</Text><Text style={s.receiptItemSub}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>)}</View>}
     </View>
     <View style={s.receiptActionGrid}><ReceiptAction icon="↓" label="PDF yuklab olish" primary busy={busy === 'pdf'} disabled={Boolean(busy)} onPress={() => run('pdf', onDownload)} /><ReceiptAction icon="▣" label="Chop etish" busy={busy === 'print'} disabled={Boolean(busy)} onPress={() => run('print', onPrint)} /><ReceiptAction icon="✉" label="SMS yuborish" orange busy={busy === 'sms'} disabled={Boolean(busy)} onPress={() => run('sms', onSms)} /></View>
+    <View style={s.receiptRecordGrid}>
+      <Pressable disabled={Boolean(busy) || !returnableItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptReturnButton, (pressed || !returnableItems.length) && s.receiptRecordDisabled]} onPress={() => setReturnOpen(true)}><MaterialCommunityIcons name="package-down" size={27} color={C.pageInk} /><Text style={s.receiptReturnButtonText}>Qaytarildi</Text></Pressable>
+      <Pressable disabled={Boolean(busy) || allPending <= 0} style={({ pressed }) => [s.receiptRecordButton, s.receiptPaidButton, (pressed || allPending <= 0) && s.receiptRecordDisabled]} onPress={() => setPaymentOpen(true)}><MaterialCommunityIcons name="cash-check" size={27} color={C.white} /><Text style={s.receiptPaidButtonText}>To‘landi</Text></Pressable>
+    </View>
     <Text style={s.shareHint}>Birlamchi kanal: <Text style={{ fontWeight: '500', color: C.pageInk }}>{channel}</Text></Text><Pressable disabled={Boolean(busy)} style={s.shareButton} onPress={() => run('share', onShare)}><Text style={s.shareButtonText}>{busy === 'share' ? 'Tayyorlanmoqda...' : 'Boshqa ilovaga ulashish'}</Text></Pressable>
-  </ScrollView></SafeAreaView>}</Modal>;
+  </ScrollView></SafeAreaView>}</Modal><ReturnReceiptModal open={returnOpen} rental={rental} onClose={() => setReturnOpen(false)} onSubmit={onReturn} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPayment} /></>;
+}
+
+function ReturnReceiptModal({ open, rental, onClose, onSubmit }) {
+  const items = rental ? openItems(rental) : [];
+  const [quantities, setQuantities] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (open) {
+      setQuantities(Object.fromEntries(items.map((item) => [item.id, '0'])));
+      setSaving(false);
+      setError('');
+    }
+  }, [open, rental?.id]);
+  const fillAll = () => setQuantities(Object.fromEntries(items.map((item) => [item.id, String(item.quantity)])));
+  const submit = async () => {
+    if (saving) return;
+    const returns = [];
+    for (const item of items) {
+      const quantity = Number(quantities[item.id] || 0);
+      if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > Number(item.quantity)) {
+        setError(`${item.name}: 0 dan ${item.quantity} gacha son kiriting.`);
+        return;
+      }
+      if (quantity > 0) returns.push({ itemId: item.id, quantity });
+    }
+    if (!returns.length) {
+      setError('Kamida bitta anjom uchun qaytarilgan sonini kiriting.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    const result = await onSubmit(rental, returns);
+    setSaving(false);
+    if (result?.ok) onClose();
+    else setError(result?.error || 'Qaytarishni saqlab bo‘lmadi.');
+  };
+  return <Modal visible={Boolean(open && rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.modalContent}>
+    <ModalHeader title="Qaytarildi" subtitle="Har bir anjomdan qaytgan sonni kiriting" onClose={onClose} />
+    <Pressable style={s.returnAllButton} onPress={fillAll}><MaterialCommunityIcons name="package-check" size={25} color={C.pageInk} /><Text style={s.returnAllButtonText}>Barchasini qaytarish</Text></Pressable>
+    {items.map((item) => <View key={item.id} style={s.returnItemCard}><View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Mijozda: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.quantity}</Text></View><Field label="NECHA DONA QAYTARILDI"><TextInput style={s.input} value={quantities[item.id] ?? '0'} onChangeText={(value) => setQuantities((current) => ({ ...current, [item.id]: value.replace(/[^0-9]/g, '') }))} keyboardType="number-pad" selectTextOnFocus /></Field></View>)}
+    {error ? <View style={s.editSaveError}><MaterialCommunityIcons name="alert-circle-outline" size={24} color={C.redDark} /><Text style={s.editSaveErrorText}>{error}</Text></View> : null}
+    <Pressable disabled={saving} style={[s.mainButton, saving && s.receiptRecordDisabled]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>Qaytarishni saqlash</Text>}</Pressable>
+  </ScrollView></KeyboardAvoidingView></SafeAreaView>}</Modal>;
+}
+
+function PaymentReceiptModal({ open, rental, onClose, onSubmit }) {
+  const maximum = rental ? pendingPaymentTotal(rental) : 0;
+  const [amount, setAmount] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (open) {
+      setAmount('');
+      setSaving(false);
+      setError('');
+    }
+  }, [open, rental?.id]);
+  const submit = async () => {
+    if (saving) return;
+    const value = Number(amount);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      setError('To‘lov summasini kiriting.');
+      return;
+    }
+    if (value > maximum) {
+      setError(`To‘lov ${formatMoney(maximum)} dan oshmasligi kerak.`);
+      return;
+    }
+    setSaving(true);
+    setError('');
+    const result = await onSubmit(rental, value);
+    setSaving(false);
+    if (result?.ok) onClose();
+    else setError(result?.error || 'To‘lovni saqlab bo‘lmadi.');
+  };
+  const paymentHistory = (rental?.activity || []).filter((event) => event.type === 'payment');
+  return <Modal visible={Boolean(open && rental)} animationType="slide" transparent onRequestClose={onClose}><View style={s.paymentConfirmOverlay}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.paymentEntryCard}>
+    <View style={s.paymentEntryHead}><View style={s.paymentConfirmIcon}><MaterialCommunityIcons name="cash-check" size={32} color={C.successDark} /></View><Pressable style={s.paymentEntryClose} onPress={onClose}><Text style={s.closeText}>×</Text></Pressable></View>
+    <Text style={s.paymentConfirmTitle}>To‘landi</Text><Text style={s.paymentConfirmText}>To‘liq yoki qisman olingan pul summasini kiriting.</Text>
+    <View style={s.paymentPendingBox}><Text style={s.paymentPendingLabel}>TO‘LOV KUTILMOQDA</Text><Text style={s.paymentPendingValue}>{formatMoney(maximum)}</Text></View>
+    <Field label="TO‘LANGAN SUMMA"><TextInput autoFocus style={s.input} value={amount} onChangeText={(value) => setAmount(value.replace(/[^0-9]/g, ''))} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+    <Pressable style={s.payAllButton} onPress={() => setAmount(String(maximum))}><Text style={s.payAllButtonText}>To‘liq summani kiritish</Text></Pressable>
+    {paymentHistory.length > 0 && <Text style={s.paymentHistoryHint}>Oldingi to‘lovlar: {paymentHistory.length} ta · {formatMoney(paymentHistory.reduce((sum, event) => sum + Number(event.amount || 0), 0))}</Text>}
+    {error ? <View style={s.paymentConfirmError}><Text style={s.paymentConfirmErrorText}>{error}</Text></View> : null}
+    <View style={s.paymentConfirmActions}><Pressable disabled={saving} style={s.paymentCancelButton} onPress={onClose}><Text style={s.paymentCancelText}>Bekor qilish</Text></Pressable><Pressable disabled={saving} style={[s.paymentConfirmButton, saving && s.receiptRecordDisabled]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.paymentConfirmButtonText}>To‘lovni saqlash</Text>}</Pressable></View>
+  </KeyboardAvoidingView></View></Modal>;
 }
 
 function ReceiptAction({ icon, label, onPress, primary, orange, busy, disabled }) {
@@ -1425,6 +1584,11 @@ const s = StyleSheet.create({
   detailSummary: { backgroundColor: C.card, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, padding: 20, marginBottom: 18 }, detailLabel: { color: C.green2, fontSize: 20, letterSpacing: 1, fontWeight: '400' }, detailTotal: { color: C.green2, fontSize: 35.1, fontWeight: '500', marginTop: 6 }, detailDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 8 }, detailSectionHeader: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4, marginBottom: 1 }, detailSectionCount: { color: C.pageMuted, fontSize: 20, fontWeight: '400' }, paidSectionTotal: { color: C.pageAccent, fontSize: 20, fontWeight: '500' }, detailItem: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginTop: 8 }, detailItemTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, detailItemName: { color: C.ink, fontSize: 20, fontWeight: '500' }, detailItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, detailItemTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, returnButton: { borderRadius: 8, backgroundColor: C.green, alignItems: 'center', paddingVertical: 15, marginTop: 12 }, returnButtonText: { color: C.white, fontWeight: '500', fontSize: 20 }, returnHistoryItem: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 13, marginTop: 8 }, returnHistoryAmount: { color: C.green2, fontSize: 20, fontWeight: '400' }, paidBadge: { alignSelf: 'flex-start', borderRadius: 8, backgroundColor: C.greenSoft, paddingHorizontal: 8, paddingVertical: 4, marginTop: 9 }, paidBadgeText: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .4 }, receiptButton: { borderRadius: 8, borderWidth: 1, borderColor: C.pageAccent, alignItems: 'center', paddingVertical: 12, marginTop: 15 }, receiptButtonText: { color: C.pageAccent, fontWeight: '500', fontSize: 20 },
   overlay: { flex: 1, backgroundColor: 'rgba(17,24,39,.48)', justifyContent: 'flex-end' }, returnSheet: { maxHeight: '89%', backgroundColor: C.page, padding: 18, paddingBottom: Platform.OS === 'ios' ? 32 : 20, borderTopLeftRadius: 8, borderTopRightRadius: 8 }, returnHint: { fontSize: 20, lineHeight: 24, color: C.pageMuted, fontWeight: '400', marginBottom: 12 }, returnItemsScroll: { flexGrow: 0, marginBottom: 13 }, returnItemsList: { gap: 8 }, returnItemCard: { backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.line, padding: 16 }, returnItemHeading: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', marginBottom: 9 }, returnItemMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, returnMax: { color: C.green2, fontSize: 20, fontWeight: '400' },
   editSaveError: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, borderRadius: 12, padding: 12, marginBottom: 10 }, editSaveErrorText: { flex: 1, color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' },
+  activityCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, activityRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.line }, activityIcon: { width: 42, height: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, activityIconPayment: { backgroundColor: '#14351F' }, activityIconReturn: { backgroundColor: '#382E0B' }, activityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' }, activityMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 3 },
+  receiptActivity: { marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.line }, receiptActivityRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }, receiptActivityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' },
+  receiptRecordGrid: { flexDirection: 'row', gap: 10, marginBottom: 14 }, receiptRecordButton: { flex: 1, minHeight: 62, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 10 }, receiptReturnButton: { backgroundColor: C.page, borderWidth: 1, borderColor: C.pageInk }, receiptReturnButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500' }, receiptRecordDisabled: { opacity: .45 },
+  returnAllButton: { minHeight: 56, borderRadius: 8, backgroundColor: C.page, borderWidth: 1, borderColor: C.pageInk, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 12 }, returnAllButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500' },
+  paymentEntryCard: { width: '100%', maxWidth: 470, backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.line, padding: 20 }, paymentEntryHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }, paymentEntryClose: { width: 42, height: 42, borderRadius: 8, backgroundColor: C.cardRaised, alignItems: 'center', justifyContent: 'center' }, paymentPendingBox: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.orange, borderRadius: 8, padding: 14, marginVertical: 16 }, paymentPendingLabel: { color: C.orange, fontSize: 20, fontWeight: '400' }, paymentPendingValue: { color: C.orange, fontSize: 26, fontWeight: '500', marginTop: 6 }, payAllButton: { minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: C.success, backgroundColor: '#14351F', alignItems: 'center', justifyContent: 'center', marginTop: -4 }, payAllButtonText: { color: C.successDark, fontSize: 20, fontWeight: '500' }, paymentHistoryHint: { color: C.muted, fontSize: 20, lineHeight: 25, marginTop: 12 },
   receiptPaper: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 18, marginBottom: 13 }, receiptHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderStyle: 'dashed', borderBottomColor: C.line }, receiptNumber: { color: C.muted, fontSize: 20, fontWeight: '400' }, receiptCustomer: { alignItems: 'center', paddingVertical: 17 }, receiptName: { color: C.ink, fontSize: 20, fontWeight: '500' }, receiptDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 7 }, receiptSectionTitle: { color: C.green2, fontSize: 20, letterSpacing: .8, fontWeight: '400', marginBottom: 2 }, receiptRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: C.line }, receiptItemName: { color: C.ink, fontSize: 20, fontWeight: '400' }, receiptItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, receiptPaidAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentBlock: { marginTop: 12, backgroundColor: C.cardRaised, borderRadius: 8, padding: 12, borderWidth: 1, borderColor: C.blueLine }, receiptCurrentTitle: { color: C.green2, fontSize: 20, letterSpacing: .45, fontWeight: '400', marginBottom: 7 }, receiptOpenRow: { paddingVertical: 8, borderTopWidth: 1, borderTopColor: C.line }, receiptOpenAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentTotal: { color: C.green2, fontWeight: '500', fontSize: 20.8, textAlign: 'right', paddingTop: 8, marginTop: 4, borderTopWidth: 1, borderTopColor: C.blueLine }, receiptReminder: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 10 }, receiptGrand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 15, marginTop: 13, borderTopWidth: 1, borderTopColor: C.ink }, receiptGrandLabel: { color: C.ink, fontSize: 20, fontWeight: '500', maxWidth: '56%' }, receiptGrandValue: { color: C.green2, fontSize: 23.3, fontWeight: '500' }, receiptActionGrid: { flexDirection: 'row', gap: 8, marginBottom: 13 }, receiptAction: { flex: 1, minHeight: 78, paddingVertical: 11, paddingHorizontal: 8, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: C.card }, receiptActionPrimary: { backgroundColor: C.green, borderColor: C.green }, receiptActionOrange: { borderColor: C.blueLine, backgroundColor: C.card }, receiptActionIcon: { color: C.green2, fontSize: 22.1, fontWeight: '400' }, receiptActionLabel: { color: C.green2, fontSize: 20, textAlign: 'center', fontWeight: '400' }, shareHint: { textAlign: 'center', color: C.pageMuted, fontSize: 20, fontWeight: '400', marginBottom: 10 }, shareButton: { minHeight: 44, borderRadius: 8, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card }, shareButtonText: { color: C.green2, fontSize: 20, fontWeight: '400' },
 });
 

@@ -33,6 +33,7 @@ function toRentalItem(row) {
     status,
     returnedAt: row.returnedAt || null,
     frozenAmount: numberOrNull(row.frozenAmount),
+    paidAmount: Math.max(0, Number(row.paidAmount) || 0),
     paid: row.paid === true || Number(row.paid) === 1,
   };
 
@@ -48,6 +49,25 @@ function toRentalItem(row) {
     }]
     : [];
   return item;
+}
+
+function toRentalEvent(row) {
+  let details = {};
+  try {
+    details = row.details ? JSON.parse(row.details) : {};
+  } catch {
+    details = {};
+  }
+  return {
+    id: row.id,
+    rentalId: row.rentalId,
+    type: row.type,
+    quantity: Number(row.quantity) || 0,
+    amount: Number(row.amount) || 0,
+    details,
+    actor: row.actor || 'Admin',
+    createdAt: row.createdAt,
+  };
 }
 
 function normaliseReturnRequests(returnsOrItemId, legacyQuantity) {
@@ -120,6 +140,24 @@ async function withWriteTransaction(db, task) {
   }
 }
 
+async function insertRentalEvent(tx, {
+  rentalId,
+  type,
+  quantity = 0,
+  amount = 0,
+  details = {},
+  actor = 'Admin',
+  createdAt = new Date().toISOString(),
+}) {
+  const id = createId('event');
+  await tx.runAsync(`
+    INSERT INTO rental_events (
+      id, rental_id, event_type, quantity, amount, details, actor, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [id, rentalId, type, quantity, amount, JSON.stringify(details || {}), actor || 'Admin', createdAt]);
+  return { id, rentalId, type, quantity, amount, details, actor: actor || 'Admin', createdAt };
+}
+
 async function ensureRentalItemColumns(db) {
   const columns = await db.getAllAsync('PRAGMA table_info(rental_items)');
   const names = new Set(columns.map((column) => column.name));
@@ -129,6 +167,7 @@ async function ensureRentalItemColumns(db) {
     ['returned_at', 'TEXT'],
     ['frozen_amount', 'INTEGER'],
     ['paid', 'INTEGER NOT NULL DEFAULT 0'],
+    ['paid_amount', 'INTEGER NOT NULL DEFAULT 0'],
   ];
   for (const [name, definition] of missing) {
     if (!names.has(name)) {
@@ -320,6 +359,7 @@ export async function migrateDatabase(db) {
       status TEXT NOT NULL DEFAULT 'open',
       returned_at TEXT,
       frozen_amount INTEGER,
+      paid_amount INTEGER NOT NULL DEFAULT 0,
       paid INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (rental_id) REFERENCES rentals(id) ON DELETE CASCADE,
       FOREIGN KEY (equipment_type_id) REFERENCES equipment_types(id)
@@ -365,6 +405,18 @@ export async function migrateDatabase(db) {
       key TEXT PRIMARY KEY NOT NULL,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS rental_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      rental_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      amount INTEGER NOT NULL DEFAULT 0,
+      details TEXT NOT NULL DEFAULT '{}',
+      actor TEXT NOT NULL DEFAULT 'Admin',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (rental_id) REFERENCES rentals(id) ON DELETE CASCADE
+    );
   `);
 
   await ensureRentalItemColumns(db);
@@ -374,6 +426,14 @@ export async function migrateDatabase(db) {
       ON rental_items (rental_id, status);
     CREATE INDEX IF NOT EXISTS idx_item_returns_rental_item
       ON item_returns (rental_item_id);
+    CREATE INDEX IF NOT EXISTS idx_rental_events_rental_created
+      ON rental_events (rental_id, created_at DESC);
+  `);
+  await db.execAsync(`
+    UPDATE rental_items
+    SET paid_amount = COALESCE(frozen_amount, 0)
+    WHERE paid = 1 AND COALESCE(paid_amount, 0) = 0;
+    PRAGMA optimize;
   `);
   await materialiseLegacyReturns(db);
 
@@ -520,6 +580,7 @@ export async function fetchRentals(db) {
       ri.status,
       ri.returned_at AS returnedAt,
       ri.frozen_amount AS frozenAmount,
+      ri.paid_amount AS paidAmount,
       ri.paid
     FROM rental_items ri
     JOIN rentals r ON r.id = ri.rental_id
@@ -536,7 +597,23 @@ export async function fetchRentals(db) {
     map[item.rentalId].push(item);
     return map;
   }, {});
-  return rentals.map((rental) => ({ ...rental, items: itemsByRental[rental.id] || [] }));
+  const eventRows = await db.getAllAsync(`
+    SELECT id, rental_id AS rentalId, event_type AS type, quantity, amount,
+           details, actor, created_at AS createdAt
+    FROM rental_events
+    ORDER BY created_at DESC
+  `);
+  const eventsByRental = eventRows.reduce((map, row) => {
+    const event = toRentalEvent(row);
+    if (!map[event.rentalId]) map[event.rentalId] = [];
+    map[event.rentalId].push(event);
+    return map;
+  }, {});
+  return rentals.map((rental) => ({
+    ...rental,
+    items: itemsByRental[rental.id] || [],
+    activity: eventsByRental[rental.id] || [],
+  }));
 }
 
 export async function createRental(db, payload) {
@@ -737,6 +814,17 @@ export async function editRental(db, rentalId, changes = {}) {
       }));
     }
 
+    if (returnedRows.length) {
+      await insertRentalEvent(tx, {
+        rentalId,
+        type: 'return',
+        quantity: returnedRows.reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+        amount: returnedRows.reduce((sum, item) => sum + Number(item.frozenAmount || 0), 0),
+        details: { items: returnedRows.map((item) => ({ id: item.id, name: item.name, quantity: item.quantity, amount: item.frozenAmount })) },
+        createdAt: changedAt,
+      });
+    }
+
     remainingRows = await fetchOpenItemsForRental(tx, rentalId);
     wasClosed = remainingRows.length === 0;
     await tx.runAsync(
@@ -766,12 +854,83 @@ export async function editRental(db, rentalId, changes = {}) {
 
 export async function markRentalItemPaid(db, itemId) {
   return withWriteTransaction(db, async (tx) => {
-    const item = await tx.getFirstAsync('SELECT id, status FROM rental_items WHERE id = ?', [itemId]);
+    const item = await tx.getFirstAsync(`
+      SELECT id, rental_id AS rentalId, name, status,
+             COALESCE(frozen_amount, 0) AS frozenAmount,
+             COALESCE(paid_amount, 0) AS paidAmount,
+             paid
+      FROM rental_items WHERE id = ?
+    `, [itemId]);
     if (!item || item.status !== ITEM_STATUS.RETURNED) {
       throw new Error('Faqat qaytarilgan anjom uchun to‘lovni tasdiqlash mumkin.');
     }
-    await tx.runAsync('UPDATE rental_items SET paid = 1 WHERE id = ?', [itemId]);
+    const alreadyPaid = item.paid === true || Number(item.paid) === 1
+      ? Number(item.frozenAmount) || 0
+      : Number(item.paidAmount) || 0;
+    const remaining = Math.max(0, Number(item.frozenAmount || 0) - alreadyPaid);
+    if (!remaining) return itemId;
+    const paidAt = new Date().toISOString();
+    await tx.runAsync('UPDATE rental_items SET paid_amount = COALESCE(frozen_amount, 0), paid = 1 WHERE id = ?', [itemId]);
+    await insertRentalEvent(tx, {
+      rentalId: item.rentalId,
+      type: 'payment',
+      amount: remaining,
+      details: { allocations: [{ itemId, name: item.name, amount: remaining }] },
+      createdAt: paidAt,
+    });
     return itemId;
+  });
+}
+
+export async function recordRentalPayment(db, rentalId, amount, actor = 'Admin') {
+  const paymentAmount = Number(amount);
+  if (!Number.isSafeInteger(paymentAmount) || paymentAmount <= 0) {
+    throw new Error('To‘lov summasini to‘g‘ri kiriting.');
+  }
+  return withWriteTransaction(db, async (tx) => {
+    const rental = await tx.getFirstAsync('SELECT id FROM rentals WHERE id = ?', [rentalId]);
+    if (!rental) throw new Error('Ijara topilmadi.');
+    const rows = await tx.getAllAsync(`
+      SELECT id, name, COALESCE(frozen_amount, 0) AS frozenAmount,
+             CASE WHEN paid = 1 THEN COALESCE(frozen_amount, 0) ELSE COALESCE(paid_amount, 0) END AS paidAmount
+      FROM rental_items
+      WHERE rental_id = ? AND status = 'returned'
+      ORDER BY returned_at, rowid
+    `, [rentalId]);
+    const outstanding = rows.reduce((sum, item) => (
+      sum + Math.max(0, Number(item.frozenAmount || 0) - Number(item.paidAmount || 0))
+    ), 0);
+    if (!outstanding) throw new Error('Tasdiqlanmagan to‘lov yo‘q.');
+    if (paymentAmount > outstanding) {
+      throw new Error(`To‘lov kutilayotgan ${outstanding.toLocaleString('uz-UZ')} so‘mdan oshmasligi kerak.`);
+    }
+
+    let remainingPayment = paymentAmount;
+    const allocations = [];
+    for (const item of rows) {
+      if (remainingPayment <= 0) break;
+      const itemOutstanding = Math.max(0, Number(item.frozenAmount || 0) - Number(item.paidAmount || 0));
+      if (!itemOutstanding) continue;
+      const allocated = Math.min(itemOutstanding, remainingPayment);
+      const nextPaidAmount = Number(item.paidAmount || 0) + allocated;
+      await tx.runAsync(
+        'UPDATE rental_items SET paid_amount = ?, paid = ? WHERE id = ?',
+        [nextPaidAmount, nextPaidAmount >= Number(item.frozenAmount || 0) ? 1 : 0, item.id],
+      );
+      allocations.push({ itemId: item.id, name: item.name, amount: allocated });
+      remainingPayment -= allocated;
+    }
+
+    const paidAt = new Date().toISOString();
+    const event = await insertRentalEvent(tx, {
+      rentalId,
+      type: 'payment',
+      amount: paymentAmount,
+      details: { allocations },
+      actor,
+      createdAt: paidAt,
+    });
+    return { ...event, remainingAmount: outstanding - paymentAmount };
   });
 }
 
@@ -875,6 +1034,15 @@ export async function registerReturn(db, rentalId, returnsOrItemId, legacyQuanti
         ]);
       }
     }
+
+    await insertRentalEvent(tx, {
+      rentalId,
+      type: 'return',
+      quantity: returnedRows.reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+      amount: returnedRows.reduce((sum, item) => sum + Number(item.frozenAmount || 0), 0),
+      details: { items: returnedRows.map((item) => ({ id: item.id, name: item.name, quantity: item.quantity, amount: item.frozenAmount })) },
+      createdAt: returnedAt,
+    });
 
     remainingRows = await fetchOpenItemsForRental(tx, rentalId);
     wasClosed = remainingRows.length === 0;

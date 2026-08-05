@@ -48,6 +48,7 @@ function toItem(row) {
     status: row.status === 'returned' ? 'returned' : 'open',
     returnedAt: row.returned_at || row.returnedAt || null,
     frozenAmount: row.frozen_amount ?? row.frozenAmount ?? null,
+    paidAmount: Number(row.paid_amount ?? row.paidAmount) || 0,
     paid: row.paid === true,
     returns: row.status === 'returned'
       ? [{
@@ -58,6 +59,19 @@ function toItem(row) {
         frozenAmount: row.frozen_amount ?? row.frozenAmount ?? null,
       }]
       : [],
+  };
+}
+
+function toRentalEvent(row) {
+  return {
+    id: row.id,
+    rentalId: row.rental_id || row.rentalId,
+    type: row.event_type || row.type,
+    quantity: Number(row.quantity) || 0,
+    amount: Number(row.amount) || 0,
+    details: row.details && typeof row.details === 'object' ? row.details : {},
+    actor: row.actor || 'Admin',
+    createdAt: row.created_at || row.createdAt,
   };
 }
 
@@ -145,16 +159,23 @@ function normaliseAddedItems(additions) {
 
 export async function fetchRentals() {
   const db = requireClient();
-  const [rentals, customers, items] = await Promise.all([
+  const [rentals, customers, items, events] = await Promise.all([
     unwrap(db.from('rentals').select('*').order('started_at', { ascending: false })),
     unwrap(db.from('customers').select('*')),
     unwrap(db.from('rental_items').select('*').gt('quantity', 0).order('rental_id').order('id')),
+    unwrap(db.from('rental_events').select('*').order('created_at', { ascending: false })),
   ]);
   const customerById = new Map((customers || []).map((row) => [row.id, row]));
   const itemsByRental = (items || []).reduce((map, row) => {
     const item = toItem(row);
     if (!map[item.rentalId]) map[item.rentalId] = [];
     map[item.rentalId].push(item);
+    return map;
+  }, {});
+  const eventsByRental = (events || []).reduce((map, row) => {
+    const event = toRentalEvent(row);
+    if (!map[event.rentalId]) map[event.rentalId] = [];
+    map[event.rentalId].push(event);
     return map;
   }, {});
   return (rentals || []).map((row) => {
@@ -167,6 +188,7 @@ export async function fetchRentals() {
       customerName: customer.full_name || 'Noma’lum mijoz',
       phone: customer.phone || '',
       items: itemsByRental[row.id] || [],
+      activity: eventsByRental[row.id] || [],
     };
   });
 }
@@ -316,6 +338,19 @@ export async function editRental(rentalId, changes = {}) {
 export async function markRentalItemPaid(itemId) {
   await unwrap(requireClient().rpc('mark_rental_item_paid', { p_item_id: itemId }));
   return itemId;
+}
+
+export async function recordRentalPayment(rentalId, amount, actor = 'Admin') {
+  const paymentAmount = Number(amount);
+  if (!Number.isSafeInteger(paymentAmount) || paymentAmount <= 0) {
+    throw new Error('To‘lov summasini to‘g‘ri kiriting.');
+  }
+  return unwrap(requireClient().rpc('record_rental_payment', {
+    p_rental_id: rentalId,
+    p_amount: paymentAmount,
+    p_paid_at: new Date().toISOString(),
+    p_actor: actor || 'Admin',
+  }));
 }
 
 export async function registerReturn(rentalId, returnsOrItemId, legacyQuantity) {

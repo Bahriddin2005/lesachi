@@ -33,6 +33,7 @@ create table if not exists public.rental_items (
   status text not null default 'open',
   returned_at timestamptz,
   frozen_amount integer,
+  paid_amount integer not null default 0,
   paid boolean not null default false
 );
 
@@ -50,6 +51,17 @@ create table if not exists public.sent_messages (
   message text not null,
   status text not null,
   created_at timestamptz not null
+);
+
+create table if not exists public.rental_events (
+  id text primary key,
+  rental_id text not null references public.rentals(id) on delete cascade,
+  event_type text not null check (event_type in ('return', 'payment')),
+  quantity integer not null default 0,
+  amount integer not null default 0,
+  details jsonb not null default '{}'::jsonb,
+  actor text not null default 'Admin',
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.sms_queue (
@@ -72,6 +84,8 @@ create index if not exists rental_items_rental_status_idx
   on public.rental_items (rental_id, status);
 create index if not exists rental_items_equipment_status_idx
   on public.rental_items (equipment_type_id, status);
+create index if not exists rental_events_rental_created_idx
+  on public.rental_events (rental_id, created_at desc);
 
 -- This app is intentionally a shared, no-login workspace: every signed-out
 -- user can read and write the same company records.  The public anon key is
@@ -81,7 +95,7 @@ declare table_name text;
 begin
   foreach table_name in array array[
     'customers', 'equipment_types', 'rentals', 'rental_items',
-    'item_returns', 'sent_messages', 'sms_queue', 'settings'
+    'item_returns', 'sent_messages', 'sms_queue', 'settings', 'rental_events'
   ] loop
     execute format('grant select, insert, update, delete on table public.%I to anon, authenticated', table_name);
     execute format('alter table public.%I enable row level security', table_name);
@@ -95,6 +109,11 @@ end $$;
 
 alter table public.rental_items
   add column if not exists paid boolean not null default false;
+alter table public.rental_items
+  add column if not exists paid_amount integer not null default 0;
+update public.rental_items
+set paid_amount = coalesce(frozen_amount, 0)
+where paid = true and paid_amount = 0;
 
 -- Partial returns must be atomic.  The browser invokes this function through
 -- Supabase RPC, while row locks prevent two users from returning the same
@@ -491,3 +510,6 @@ values
   ('message_channel', 'Telegram'),
   ('apk_url', '')
 on conflict (key) do nothing;
+
+-- Apply the additive payment/history upgrade after this base schema when
+-- provisioning an existing project: scripts/payment-history-migration.sql

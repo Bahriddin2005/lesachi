@@ -28,6 +28,11 @@ export function markRentalItemPaid(db, itemId) {
     ? remote.markRentalItemPaid(itemId)
     : local.markRentalItemPaid(db, itemId);
 }
+export function recordRentalPayment(db, rentalId, amount, actor = 'Admin') {
+  return usesRemoteDatabase
+    ? remote.recordRentalPayment(rentalId, amount, actor)
+    : local.recordRentalPayment(db, rentalId, amount, actor);
+}
 export function registerReturn(db, rentalId, returns, legacyQuantity) {
   return usesRemoteDatabase
     ? remote.registerReturn(rentalId, returns, legacyQuantity)
