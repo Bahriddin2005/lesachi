@@ -102,6 +102,7 @@ function LesaApp({ db }) {
   const [equipment, setEquipment] = useState([]);
   const [smsQueue, setSmsQueue] = useState([]);
   const [channel, setChannel] = useState('Telegram');
+  const [apkUrl, setApkUrl] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
@@ -114,22 +115,26 @@ function LesaApp({ db }) {
   const [installPrompt, setInstallPrompt] = useState(null);
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
   const [appInstalled, setAppInstalled] = useState(false);
+  const [installCapabilityChecked, setInstallCapabilityChecked] = useState(Platform.OS !== 'web');
+  const [isIosWeb, setIsIosWeb] = useState(false);
   const [splashReady, setSplashReady] = useState(false);
   const [smsSending, setSmsSending] = useState(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setRefreshing(true);
     try {
-      const [rentalRows, equipmentRows, savedChannel, smsRows] = await Promise.all([
+      const [rentalRows, equipmentRows, savedChannel, savedApkUrl, smsRows] = await Promise.all([
         fetchRentals(db),
         fetchEquipmentTypes(db),
         getSetting(db, 'message_channel'),
+        getSetting(db, 'apk_url'),
         fetchSmsQueue(db),
       ]);
       setRentals(rentalRows);
       setEquipment(equipmentRows);
       setSmsQueue(smsRows);
       if (savedChannel) setChannel(savedChannel);
+      setApkUrl(savedApkUrl || '');
       return rentalRows;
     } finally {
       setLoading(false);
@@ -165,22 +170,49 @@ function LesaApp({ db }) {
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return undefined;
-    const standalone = window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator?.standalone;
-    if (standalone) setAppInstalled(true);
+    const displayModeQueries = ['standalone', 'fullscreen', 'minimal-ui', 'window-controls-overlay']
+      .map((mode) => window.matchMedia?.(`(display-mode: ${mode})`))
+      .filter(Boolean);
+    const syncDisplayMode = () => {
+      const standalone = displayModeQueries.some((query) => query.matches) || window.navigator?.standalone === true;
+      if (standalone) setAppInstalled(true);
+    };
+    syncDisplayMode();
+    const userAgent = window.navigator?.userAgent || '';
+    const iosDevice = /iPad|iPhone|iPod/i.test(userAgent)
+      || (/Macintosh/i.test(userAgent) && Number(window.navigator?.maxTouchPoints || 0) > 1);
+    setIsIosWeb(iosDevice);
 
     const handleBeforeInstallPrompt = (event) => {
       event.preventDefault();
       setInstallPrompt(event);
+      setInstallCapabilityChecked(true);
+    };
+    const handleCapturedInstallPrompt = () => {
+      if (window.__lesachiInstallPrompt) {
+        setInstallPrompt(window.__lesachiInstallPrompt);
+        setInstallCapabilityChecked(true);
+      }
     };
     const handleAppInstalled = () => {
       setAppInstalled(true);
       setInstallPrompt(null);
+      window.__lesachiInstallPrompt = null;
     };
+    handleCapturedInstallPrompt();
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('lesachi-install-ready', handleCapturedInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
+    window.addEventListener('pageshow', syncDisplayMode);
+    displayModeQueries.forEach((query) => query.addEventListener?.('change', syncDisplayMode));
+    const capabilityTimer = window.setTimeout(() => setInstallCapabilityChecked(true), 1800);
     return () => {
+      window.clearTimeout(capabilityTimer);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('lesachi-install-ready', handleCapturedInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('pageshow', syncDisplayMode);
+      displayModeQueries.forEach((query) => query.removeEventListener?.('change', syncDisplayMode));
     };
   }, []);
 
@@ -266,6 +298,15 @@ function LesaApp({ db }) {
     await setSetting(db, 'message_channel', next);
   };
 
+  const saveApkUrl = async (nextUrl) => {
+    const value = nextUrl.trim();
+    if (value && !/^https:\/\/\S+$/i.test(value)) {
+      throw new Error('Xavfsiz havola https:// bilan boshlanishi kerak.');
+    }
+    await setSetting(db, 'apk_url', value);
+    setApkUrl(value);
+  };
+
   const saveEquipment = async (payload) => {
     try {
       if (equipmentEditor?.mode === 'edit') {
@@ -307,14 +348,35 @@ function LesaApp({ db }) {
       setInstallHelpOpen(true);
       return;
     }
-    if (!installPrompt) {
+    const promptEvent = installPrompt || window.__lesachiInstallPrompt;
+    if (!promptEvent) {
       setInstallHelpOpen(true);
       return;
     }
-    await installPrompt.prompt();
-    const choice = await installPrompt.userChoice;
-    if (choice?.outcome === 'accepted') setAppInstalled(true);
-    setInstallPrompt(null);
+    try {
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice;
+      if (choice?.outcome === 'accepted') setAppInstalled(true);
+    } catch (error) {
+      setInstallHelpOpen(true);
+    } finally {
+      setInstallPrompt(null);
+      window.__lesachiInstallPrompt = null;
+      setInstallCapabilityChecked(true);
+    }
+  };
+
+  const downloadApk = () => {
+    const url = apkUrl.trim();
+    if (!url || Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.download = 'Lesachi.apk';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   };
 
   const shareReceipt = async (receiptData) => {
@@ -379,13 +441,21 @@ function LesaApp({ db }) {
             onRefresh={() => load()}
             onNew={() => setNewOpen(true)}
             onRental={setSelected}
+            installAvailable={Boolean(installPrompt)}
+            installCapabilityChecked={installCapabilityChecked}
+            installed={appInstalled}
+            isIos={isIosWeb}
+            apkUrl={apkUrl}
+            onInstall={installApp}
+            onInstallHelp={() => setInstallHelpOpen(true)}
+            onDownloadApk={downloadApk}
           />
         )}
         {screen === 'customers' && <Customers rentals={rentals} onRental={setSelected} />}
         {screen === 'history' && (
           <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: 'final' } })} />
         )}
-        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
+        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} apkUrl={apkUrl} onSaveApkUrl={saveApkUrl} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
         {screen === 'sms' && <SmsQueue items={smsQueue} sending={smsSending} onSend={sendQueuedSms} onSendAll={sendAllQueuedSms} onBack={() => setScreen('settings')} />}
         {screen === 'inventory' && <Inventory equipment={equipment} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen('settings')} onAdd={() => setEquipmentEditor({ mode: 'create', item: null })} onEdit={(item) => setEquipmentEditor({ mode: 'edit', item })} onDelete={handleDeleteEquipment} />}
 
@@ -403,7 +473,7 @@ function LesaApp({ db }) {
       <RentalEditModal target={editTarget} equipment={equipment} onClose={() => setEditTarget(null)} onSubmit={submitEdit} />
       <EquipmentModal editor={equipmentEditor} onClose={() => setEquipmentEditor(null)} onSubmit={saveEquipment} />
       <EquipmentDeleteModal item={equipmentDeleteTarget} error={equipmentDeleteError} onClose={() => { setEquipmentDeleteTarget(null); setEquipmentDeleteError(''); }} onConfirm={confirmDeleteEquipment} />
-      <InstallAppModal open={installHelpOpen} installed={appInstalled} onClose={() => setInstallHelpOpen(false)} />
+      <InstallAppModal open={installHelpOpen} installed={appInstalled} isIos={isIosWeb} onClose={() => setInstallHelpOpen(false)} />
       <ReceiptModal
         receipt={receipt}
         channel={channel}
@@ -468,7 +538,7 @@ function statusTone(days) {
   return { color: C.neutral, background: '#F9FAFB', label: 'Yangi' };
 }
 
-function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRental }) {
+function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRental, installAvailable, installCapabilityChecked, installed, isIos, apkUrl, onInstall, onInstallHelp, onDownloadApk }) {
   const [query, setQuery] = useState('');
   const filtered = rentals.filter((rental) => `${rental.customerName} ${rental.phone}`.toLowerCase().includes(query.toLowerCase()));
   const debt = rentals.reduce((total, rental) => total + currentDebt(rental), 0);
@@ -485,6 +555,16 @@ function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRe
       ListHeaderComponent={<>
         <View style={s.topBrand}><Brand /><Pressable style={s.smallAdd} onPress={onNew}><Text style={s.smallAddText}>＋</Text></Pressable></View>
         <Header title="Asosiy" subtitle={new Intl.DateTimeFormat('uz-UZ', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())} />
+        <InstallPromotion
+          installAvailable={installAvailable}
+          capabilityChecked={installCapabilityChecked}
+          installed={installed}
+          isIos={isIos}
+          apkUrl={apkUrl}
+          onInstall={onInstall}
+          onInstallHelp={onInstallHelp}
+          onDownloadApk={onDownloadApk}
+        />
         <View style={s.metricGrid}>
           <View style={s.metricCard}><Text style={s.metricLabel}>FAOL IJARALAR</Text><Text style={s.metricValue}>{rentals.length}</Text><Text style={s.metricHint}>{customerCount} faol mijoz</Text></View>
           <View style={[s.metricCard, s.metricCardAmber, { backgroundColor: C.redSoft, borderColor: C.redLine }]}><Text style={[s.metricLabelAmber, { color: C.redDark }]}>JAMI QARZ</Text><Text style={[s.metricValueAmber, { color: C.redDark }]}>{formatMoney(debt)}</Text><Text style={[s.metricHintAmber, { color: C.redDark }]}>real-time hisob</Text></View>
@@ -705,21 +785,62 @@ function SmsQueue({ items, sending, onSend, onSendAll, onBack }) {
   </ScrollView>;
 }
 
-function Settings({ channel, onChange, onInventory, onSmsQueue, smsPendingCount, onInstallApp, installAvailable, installed, remoteMode }) {
+function Settings({ channel, onChange, apkUrl, onSaveApkUrl, onInventory, onSmsQueue, smsPendingCount, onInstallApp, installAvailable, installed, remoteMode }) {
+  const [apkDraft, setApkDraft] = useState(apkUrl);
+  const [apkSaving, setApkSaving] = useState(false);
+  const [apkStatus, setApkStatus] = useState(null);
   const storageLabel = remoteMode ? 'Umumiy Supabase bazasi' : 'Qurilma SQLite bazasi';
   const storageNote = remoteMode
     ? 'Production rejimida barcha ma’lumotlar umumiy onlayn bazada saqlanadi va boshqa foydalanuvchilarga ko‘rinadi.'
     : 'Lokal rejimda ma’lumotlar shu qurilmaning o‘zida saqlanadi.';
+
+  useEffect(() => {
+    setApkDraft(apkUrl);
+  }, [apkUrl]);
+
+  const saveApk = async () => {
+    setApkSaving(true);
+    setApkStatus(null);
+    try {
+      await onSaveApkUrl(apkDraft);
+      setApkStatus({ type: 'success', text: apkDraft.trim() ? 'APK havolasi saqlandi.' : 'APK yuklab olish tugmasi yashirildi.' });
+    } catch (error) {
+      setApkStatus({ type: 'error', text: error.message || 'APK havolasini saqlab bo‘lmadi.' });
+    } finally {
+      setApkSaving(false);
+    }
+  };
+
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.screenContent}>
       <View style={s.topBrand}><Brand /></View>
       <Header title="Sozlamalar" subtitle="Ilova va xabar yuborish" />
       <View style={s.settingsCard}><Text style={s.settingsTitle}>Chek yuborish kanali</Text><Text style={s.settingsText}>Mijozga chek ulashilganda birlamchi kanal sifatida ishlatiladi.</Text><View style={s.channelGrid}>{['SMS', 'Telegram', 'WhatsApp'].map((item) => <Pressable key={item} onPress={() => onChange(item)} style={[s.channel, channel === item && s.channelActive]}><Text style={[s.channelText, channel === item && s.channelTextActive]}>{item}</Text></Pressable>)}</View></View>
-      <Pressable style={installS.installCard} onPress={onInstallApp}>
-        <View style={installS.installIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={25} color={C.green2} /></View>
-        <View style={s.flex}><Text style={s.settingsTitle}>Ilova versiyasi</Text><Text style={s.settingsText}>{installed ? 'Ilova bosh ekranga o‘rnatilgan.' : installAvailable ? 'O‘rnatish oynasini ochish uchun bosing.' : 'Saytni telefon bosh ekraniga o‘rnating.'}</Text></View>
-        <Text style={installS.installArrow}>›</Text>
-      </Pressable>
+      {Platform.OS === 'web' && <>
+        <Pressable style={installS.installCard} onPress={onInstallApp}>
+          <View style={installS.installIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={25} color={C.green2} /></View>
+          <View style={s.flex}><Text style={s.settingsTitle}>Ilova versiyasi</Text><Text style={s.settingsText}>{installed ? 'Ilova bosh ekranga o‘rnatilgan.' : installAvailable ? 'O‘rnatish oynasini ochish uchun bosing.' : 'Saytni telefon bosh ekraniga o‘rnating.'}</Text></View>
+          <Text style={installS.installArrow}>›</Text>
+        </Pressable>
+        <View style={s.settingsCard}>
+          <Text style={s.settingsTitle}>APK fayl havolasi</Text>
+          <Text style={s.settingsText}>Administrator uchun: faqat ishonchli HTTPS APK manzilini kiriting. Bo‘sh saqlansa, yuklab olish tugmasi bosh sahifada ko‘rinmaydi.</Text>
+          <TextInput
+            value={apkDraft}
+            onChangeText={(value) => { setApkDraft(value); setApkStatus(null); }}
+            style={installS.apkInput}
+            placeholder="https://sayt.uz/Lesachi.apk"
+            placeholderTextColor="#9CA3AF"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
+          {apkStatus && <Text style={[installS.apkStatus, apkStatus.type === 'error' ? installS.apkStatusError : installS.apkStatusSuccess]}>{apkStatus.text}</Text>}
+          <Pressable disabled={apkSaving} style={[installS.apkSaveButton, apkSaving && { opacity: .6 }]} onPress={saveApk}>
+            {apkSaving ? <ActivityIndicator color={C.white} /> : <Text style={installS.apkSaveText}>APK havolasini saqlash</Text>}
+          </Pressable>
+        </View>
+      </>}
       <View style={s.settingsCard}><Text style={s.settingsTitle}>Ma’lumotlar</Text><InfoRow label="Saqlash" value={storageLabel} /><InfoRow label="Hisoblash" value="Real-time, cron ishlatilmaydi" /><InfoRow label="Versiya" value="1.0.0 MVP" /></View>
       <Pressable style={s.inventoryLink} onPress={onInventory}><View><Text style={s.settingsTitle}>Ombor jadvali</Text><Text style={s.settingsText}>Anjomlar va faol ijaradagi sonlarni ko‘rish</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
       <Pressable style={s.inventoryLink} onPress={onSmsQueue}><View><Text style={s.settingsTitle}>SMS navbati</Text><Text style={s.settingsText}>{smsPendingCount ? `${smsPendingCount} ta xabar yuborishni kutmoqda` : 'Yuborilgan va kutilayotgan xabarlar'}</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
@@ -728,19 +849,48 @@ function Settings({ channel, onChange, onInventory, onSmsQueue, smsPendingCount,
   );
 }
 
+function InstallPromotion({ installAvailable, capabilityChecked, installed, isIos, apkUrl, onInstall, onInstallHelp, onDownloadApk }) {
+  if (Platform.OS !== 'web' || installed) return null;
+
+  if (installAvailable) {
+    return <View style={installS.promoBanner}>
+      <View style={installS.promoIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={30} color="#8A6D12" /></View>
+      <View style={s.flex}><Text style={installS.promoTitle}>Ilovani telefonga o‘rnating</Text><Text style={installS.promoText}>Lesachi alohida ilova kabi ochiladi va bosh ekranda ikonka paydo bo‘ladi.</Text></View>
+      <Pressable style={installS.promoButton} onPress={onInstall}><Text style={installS.promoButtonText}>O‘rnatish</Text></Pressable>
+    </View>;
+  }
+
+  if (!capabilityChecked) return null;
+  const hasApk = Boolean(apkUrl?.trim());
+  if (!isIos && !hasApk) return null;
+
+  return <View style={installS.promoBanner}>
+    <View style={installS.promoIcon}><MaterialCommunityIcons name={isIos ? 'export-variant' : 'android'} size={30} color="#8A6D12" /></View>
+    <View style={s.flex}>
+      <Text style={installS.promoTitle}>{isIos ? 'iPhone’ga o‘rnating' : 'Android ilovasini yuklab oling'}</Text>
+      <Text style={installS.promoText}>{isIos ? 'Safari’da Share → Add to Home Screen orqali saytni ilova sifatida qo‘shing.' : 'Brauzer PWA oynasini ko‘rsatmadi. Tayyor APK faylni yuklab olishingiz mumkin.'}</Text>
+      <View style={installS.promoActions}>
+        {isIos && <Pressable style={installS.promoOutlineButton} onPress={onInstallHelp}><Text style={installS.promoOutlineText}>Ko‘rsatmani ko‘rish</Text></Pressable>}
+        {hasApk && <Pressable style={installS.promoButton} onPress={onDownloadApk}><Text style={installS.promoButtonText}>{isIos ? 'Android uchun APK' : 'APK faylni yuklab olish'}</Text></Pressable>}
+      </View>
+    </View>
+  </View>;
+}
+
 function InfoRow({ label, value }) {
   return <View style={s.infoRow}><Text style={s.infoLabel}>{label}</Text><Text style={s.infoValue}>{value}</Text></View>;
 }
 
-function InstallAppModal({ open, installed, onClose }) {
+function InstallAppModal({ open, installed, isIos, onClose }) {
   return (
     <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
       <View style={installS.installOverlay}>
         <View style={installS.installModal}>
           <View style={installS.installModalIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={30} color={C.green2} /></View>
           <Text style={installS.installModalTitle}>{installed ? 'Ilova o‘rnatilgan' : 'Ilovani o‘rnatish'}</Text>
-          <Text style={installS.installModalText}>Android Chrome’da brauzer menyusidan “Install app” yoki “Add to Home screen”ni tanlang.</Text>
-          <Text style={installS.installModalText}>iPhone’da Safari → Share → “Add to Home Screen”ni bosing.</Text>
+          {isIos
+            ? <Text style={installS.installModalText}>Safari pastki menyusidagi Share belgisini bosing, so‘ng “Add to Home Screen”ni tanlab, “Add” bilan tasdiqlang.</Text>
+            : <><Text style={installS.installModalText}>Android Chrome’da brauzer menyusidan “Install app” yoki “Add to Home screen”ni tanlang.</Text><Text style={installS.installModalText}>iPhone’da Safari → Share → “Add to Home Screen”ni bosing.</Text></>}
           <Pressable style={installS.installCloseButton} onPress={onClose}><Text style={installS.installCloseText}>Yopish</Text></Pressable>
         </View>
       </View>
@@ -1009,6 +1159,15 @@ const s = StyleSheet.create({
 });
 
 const installS = StyleSheet.create({
+  promoBanner: { backgroundColor: '#FFFBEF', borderWidth: 1, borderColor: '#E7D28A', borderRadius: 14, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  promoIcon: { width: 50, height: 50, borderRadius: 14, backgroundColor: '#F8E8AE', alignItems: 'center', justifyContent: 'center' },
+  promoTitle: { color: '#5F4B0D', fontSize: 22, fontWeight: '500' },
+  promoText: { color: '#6B5A25', fontSize: 20, lineHeight: 25, fontWeight: '400', marginTop: 4 },
+  promoActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
+  promoButton: { minHeight: 48, borderRadius: 10, backgroundColor: '#C9A227', paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' },
+  promoButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' },
+  promoOutlineButton: { minHeight: 48, borderRadius: 10, backgroundColor: C.white, borderWidth: 1, borderColor: '#C9A227', paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center' },
+  promoOutlineText: { color: '#7A6010', fontSize: 20, fontWeight: '500', textAlign: 'center' },
   installCard: { minHeight: 74, padding: 14, backgroundColor: C.white, borderRadius: 12, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   installIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: C.orangeSoft, alignItems: 'center', justifyContent: 'center', marginRight: 11 },
   installArrow: { color: C.green2, fontSize: 32.5, fontWeight: '400', marginLeft: 8 },
@@ -1019,6 +1178,12 @@ const installS = StyleSheet.create({
   installModalText: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginBottom: 8 },
   installCloseButton: { minHeight: 44, borderRadius: 10, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center', marginTop: 10 },
   installCloseText: { color: C.white, fontSize: 20, fontWeight: '500' },
+  apkInput: { minHeight: 56, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, paddingHorizontal: 16, fontSize: 20, color: C.ink },
+  apkStatus: { fontSize: 20, lineHeight: 24, marginTop: 9 },
+  apkStatusSuccess: { color: C.successDark },
+  apkStatusError: { color: C.redDark },
+  apkSaveButton: { minHeight: 52, borderRadius: 10, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center', marginTop: 12, paddingHorizontal: 16 },
+  apkSaveText: { color: C.white, fontSize: 20, fontWeight: '500' },
   pendingPanel: { backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FED7AA', borderRadius: 12, padding: 14, marginBottom: 18 }, pendingPanelHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, pendingPanelTitle: { color: '#9A3412', fontSize: 22, fontWeight: '500' }, pendingPanelSub: { color: '#C2410C', fontSize: 18, marginTop: 4 }, pendingPanelTotal: { color: '#C2410C', fontSize: 22, fontWeight: '500' }, pendingPanelRow: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#FED7AA', paddingTop: 10, marginTop: 10, gap: 10 }, pendingPanelAmount: { color: '#C2410C', fontSize: 20, fontWeight: '500' },
   pendingPaymentCard: { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }, pendingPaymentFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 9 }, paidConfirmButton: { borderRadius: 10, backgroundColor: C.orange, paddingHorizontal: 14, paddingVertical: 8 }, paidConfirmText: { color: C.white, fontSize: 18, fontWeight: '500' },
   smsQueueCard: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, marginTop: 10 }, smsQueueHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, smsQueueStatus: { fontSize: 16, fontWeight: '500', letterSpacing: .3 }, smsQueueMessage: { color: C.ink, fontSize: 19, lineHeight: 26, marginTop: 10 }, smsQueueError: { color: C.redDark, fontSize: 18, marginTop: 8 }, smsQueueSend: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.green, paddingHorizontal: 16, paddingVertical: 9, marginTop: 12 }, smsQueueSendText: { color: C.white, fontSize: 18, fontWeight: '500' },

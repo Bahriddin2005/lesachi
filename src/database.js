@@ -385,6 +385,7 @@ export async function migrateDatabase(db) {
     await db.runAsync('INSERT INTO equipment_types (id, name, daily_price, total_quantity) VALUES (?, ?, ?, ?)', [createId('eq'), 'Teleskopik tirgak', 8000, 0]);
   }
   await db.runAsync("INSERT OR IGNORE INTO settings (key, value) VALUES ('message_channel', 'Telegram')");
+  await db.runAsync("INSERT OR IGNORE INTO settings (key, value) VALUES ('apk_url', '')");
 }
 
 export async function fetchEquipmentTypes(db) {

@@ -487,5 +487,7 @@ values
 on conflict (name) do nothing;
 
 insert into public.settings (key, value)
-values ('message_channel', 'Telegram')
+values
+  ('message_channel', 'Telegram'),
+  ('apk_url', '')
 on conflict (key) do nothing;

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lesachi-pwa-v7';
+const CACHE_NAME = 'lesachi-pwa-v8';
 const APP_SHELL = [
   './',
   './index.html',
@@ -34,6 +34,10 @@ self.addEventListener('fetch', (event) => {
   // must always be read from the remote database rather than this PWA shell.
   const requestUrl = new URL(event.request.url);
   if (requestUrl.origin !== self.location.origin) return;
+
+  // APK fayli ilova qobig‘i emas: uni keshga yoki HTML offline javobiga
+  // almashtirmasdan brauzerning odatiy yuklab olish oqimiga qoldiramiz.
+  if (requestUrl.pathname.toLowerCase().endsWith('.apk')) return;
 
   // Always revalidate HTML so a new deployment is visible immediately. The
   // cached shell remains the offline fallback when the network is unavailable.

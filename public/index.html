@@ -12,6 +12,14 @@
     <link rel="apple-touch-icon" href="./icon-192.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
     <title>%WEB_TITLE%</title>
+    <script>
+      window.__lesachiInstallPrompt = null;
+      window.addEventListener('beforeinstallprompt', function (event) {
+        event.preventDefault();
+        window.__lesachiInstallPrompt = event;
+        window.dispatchEvent(new Event('lesachi-install-ready'));
+      });
+    </script>
     <style id="expo-reset">
       html,
       body {
@@ -33,7 +41,7 @@
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js?v=3').catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=8').catch(() => {});
         });
       }
     </script>
