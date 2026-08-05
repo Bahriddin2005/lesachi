@@ -887,7 +887,10 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
       dailyPrice: item.dailyPrice,
       quantity: Number(addQuantities[item.id] || 0),
     })).filter((entry) => entry.quantity > 0);
-    if (!returns.length && !additions.length) return Alert.alert('O‘zgarish kiritilmadi', 'Hech qanday o‘zgarish kiritilmadi.');
+    if (!returns.length && !additions.length) {
+      onClose();
+      return;
+    }
     setSaving(true);
     try { await onSubmit({ returns, additions }); } finally { setSaving(false); }
   };
