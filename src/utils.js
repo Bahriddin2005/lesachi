@@ -145,6 +145,21 @@ export function formatMoney(value) {
   return `${formatted} so‘m`;
 }
 
+/**
+ * Human-readable calculation used by every receipt surface.
+ * The one-day factor is omitted to keep a new rental concise, while older
+ * rentals include it so the displayed multiplication always equals the total.
+ */
+export function receiptCalculationText(line = {}) {
+  const quantity = Math.max(0, numberValue(line.quantity));
+  const dailyPrice = Math.max(0, numberValue(line.dailyPrice));
+  const days = Math.max(1, numberValue(line.days) || 1);
+  const persistedAmount = savedAmount(line.amount ?? line.frozenAmount);
+  const amount = persistedAmount ?? quantity * dailyPrice * days;
+  const dayFactor = days > 1 ? ` × ${days} kun` : '';
+  return `${quantity} ta × ${formatMoney(dailyPrice)}${dayFactor} = ${formatMoney(amount)}`;
+}
+
 export function formatDate(value, includeTime = false) {
   const date = new Date(value || new Date());
   const safeDate = Number.isFinite(date.getTime()) ? date : new Date();
@@ -339,7 +354,7 @@ function receiptHeading(type) {
 function lineText(line, status) {
   const label = status === 'returned' ? (line.paid ? 'TO‘LANDI' : 'TO‘LOV KUTILMOQDA') : 'JORIY QARZ';
   const growth = status === 'returned' ? '' : ' · o‘sishda davom etadi';
-  return `${label} — ${line.name}: ${line.quantity} dona × ${formatMoney(line.dailyPrice)} × ${line.days} kun = ${formatMoney(line.amount)}${growth}`;
+  return `${label} — ${line.name}: ${receiptCalculationText(line)}${growth}`;
 }
 
 function openDescription(openItems) {
@@ -469,8 +484,8 @@ function rowsHtml(lines, status) {
       ? `${isPaid ? '✓ TO‘LANDI' : '◷ TO‘LOV KUTILMOQDA'} · ${item.days} kun · ${formatDate(item.returnedAt, true)}`
       : `JORIY QARZ · ${item.days} kun · o‘sishda davom etadi`;
     return `<tr>
-      <td><strong>${escapeHtml(item.name)}</strong><small class="${isReturned ? 'paid-note' : 'open-note'}">${escapeHtml(detail)}</small></td>
-      <td>${escapeHtml(`${item.quantity} dona`)}</td>
+      <td><strong>${escapeHtml(item.name)}</strong><small class="calculation">${escapeHtml(receiptCalculationText(item))}</small><small class="${isReturned ? 'paid-note' : 'open-note'}">${escapeHtml(detail)}</small></td>
+      <td>${escapeHtml(`${item.quantity} ta`)}</td>
       <td>${escapeHtml(formatMoney(item.dailyPrice))}</td>
       <td class="amount ${isPaid ? 'paid-amount' : isReturned ? 'pending-amount' : 'open-amount'}">${escapeHtml(formatMoney(item.amount))}</td>
     </tr>`;
@@ -556,6 +571,7 @@ export function receiptHtml(rentalOrReceipt, receiptContext = {}) {
         .right { text-align: right; }
         td { padding: 13px 8px; border-bottom: 1px solid #edf1ee; vertical-align: top; }
         td small { display: block; margin-top: 5px; font-size: 9px; }
+        .calculation { color: #172521; font-weight: 700; }
         .paid-note, .paid-amount { color: #21754e; }
         .open-note, .open-amount { color: #b5652d; }
         .amount { font-weight: 700; text-align: right; white-space: nowrap; }
