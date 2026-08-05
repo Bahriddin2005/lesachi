@@ -350,7 +350,8 @@ begin
       p_changed_at,
       'open',
       null,
-      null
+      null,
+      false
     );
 
     added_rows := added_rows || jsonb_build_array(jsonb_build_object(

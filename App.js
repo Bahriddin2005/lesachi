@@ -157,6 +157,7 @@ function LesaApp({ db }) {
   const enqueueSms = async (payload) => {
     try {
       await queueSms(db, payload);
+      setSmsQueue(await fetchSmsQueue(db));
     } catch (queueError) {
       Alert.alert('SMS navbatga qo‘shilmadi', queueError.message || 'SMS matnini navbatga qo‘shib bo‘lmadi.');
     }
