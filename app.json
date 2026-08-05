@@ -22,7 +22,7 @@
     "web": {
       "bundler": "metro",
       "favicon": "./assets/lesachi-logo.png",
-      "themeColor": "#2563EB",
+      "themeColor": "#FACC15",
       "description": "Qurilish anjomlari ijarasini boshqarish ilovasi"
     },
     "plugins": [

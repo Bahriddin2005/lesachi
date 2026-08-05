@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "uz.lesa.ijara",
+      "sha256_cert_fingerprints": [
+        "BB:29:21:E4:D4:20:E5:AA:1B:51:9A:8F:20:F4:A2:65:99:2A:E0:95:37:D3:EA:17:DD:54:74:DC:92:1C:67:0C"
+      ]
+    }
+  }
+]

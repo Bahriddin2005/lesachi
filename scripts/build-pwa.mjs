@@ -20,6 +20,17 @@ for (const fileName of ['manifest.json', 'sw.js', 'icon-192.png', 'icon-512.png'
   copyFileSync(join(pwaSourceDir, fileName), join(outputDir, fileName));
 }
 
+// Android Trusted Web Activity app verification file. It must be served from
+// this exact well-known path so the installed APK opens Lesachi as a verified
+// full-screen application instead of an unverified browser tab.
+const wellKnownSourceDir = join(pwaSourceDir, '.well-known');
+const wellKnownOutputDir = join(outputDir, '.well-known');
+mkdirSync(wellKnownOutputDir, { recursive: true });
+copyFileSync(
+  join(wellKnownSourceDir, 'assetlinks.json'),
+  join(wellKnownOutputDir, 'assetlinks.json'),
+);
+
 // Vercel ignores nested `node_modules` folders during a static upload. Expo
 // SQLite's web worker normally points at its WASM file inside that folder,
 // which would make the deployed app fail with a blank screen. Copy the WASM
@@ -71,7 +82,7 @@ let indexHtml = readFileSync(indexPath, 'utf8').replace('<html lang="en">', '<ht
 
 const headTags = `
     <link rel="manifest" href="./manifest.json" />
-    <meta name="theme-color" content="#2563EB" />
+    <meta name="theme-color" content="#FACC15" />
     <link rel="apple-touch-icon" href="./icon-192.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -80,7 +91,7 @@ const serviceWorkerRegistration = `
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js?v=10').catch(() => {});
+      navigator.serviceWorker.register('./sw.js?v=11').catch(() => {});
       });
     }
   </script>`;
@@ -91,7 +102,7 @@ if (!indexHtml.includes('rel="manifest"')) {
 if (!indexHtml.includes('serviceWorker.register')) {
   indexHtml = indexHtml.replace('</body>', `${serviceWorkerRegistration}\n</body>`);
 }
-indexHtml = indexHtml.replace(/navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g, "navigator.serviceWorker.register('./sw.js?v=10')");
+indexHtml = indexHtml.replace(/navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g, "navigator.serviceWorker.register('./sw.js?v=11')");
 
 writeFileSync(indexPath, indexHtml);
 console.log(`PWA build tayyor: ${outputDir}`);
