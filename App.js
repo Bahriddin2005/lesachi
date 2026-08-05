@@ -1108,7 +1108,7 @@ function InstallPromotion({ installAvailable, capabilityChecked, installed, isIo
 
   if (installAvailable) {
     return <View style={installS.promoBanner}>
-      <View style={installS.promoIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={30} color="#8A6D12" /></View>
+      <View style={installS.promoIcon}><MaterialCommunityIcons name="cellphone-arrow-down" size={30} color={C.orange} /></View>
       <View style={s.flex}><Text style={installS.promoTitle}>Ilovani telefonga o‘rnating</Text><Text style={installS.promoText}>Lesachi alohida ilova kabi ochiladi va bosh ekranda ikonka paydo bo‘ladi.</Text></View>
       <Pressable style={installS.promoButton} onPress={onInstall}><Text style={installS.promoButtonText}>O‘rnatish</Text></Pressable>
     </View>;
@@ -1119,7 +1119,7 @@ function InstallPromotion({ installAvailable, capabilityChecked, installed, isIo
   if (!isIos && !hasApk) return null;
 
   return <View style={installS.promoBanner}>
-    <View style={installS.promoIcon}><MaterialCommunityIcons name={isIos ? 'export-variant' : 'android'} size={30} color="#8A6D12" /></View>
+    <View style={installS.promoIcon}><MaterialCommunityIcons name={isIos ? 'export-variant' : 'android'} size={30} color={C.orange} /></View>
     <View style={s.flex}>
       <Text style={installS.promoTitle}>{isIos ? 'iPhone’ga o‘rnating' : 'Android ilovasini yuklab oling'}</Text>
       <Text style={installS.promoText}>{isIos ? 'Safari’da Share → Add to Home Screen orqali saytni ilova sifatida qo‘shing.' : 'Brauzer PWA oynasini ko‘rsatmadi. Tayyor APK faylni yuklab olishingiz mumkin.'}</Text>
@@ -1749,10 +1749,10 @@ const s = StyleSheet.create({
 });
 
 const installS = StyleSheet.create({
-  promoBanner: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  promoBanner: { backgroundColor: '#C9A227', borderWidth: 2, borderColor: C.card, borderRadius: 8, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
   promoIcon: { width: 50, height: 50, borderRadius: 8, backgroundColor: C.cardRaised, alignItems: 'center', justifyContent: 'center' },
-  promoTitle: { color: C.ink, fontSize: 22, fontWeight: '500' },
-  promoText: { color: C.muted, fontSize: 20, lineHeight: 25, fontWeight: '400', marginTop: 4 },
+  promoTitle: { color: C.pageInk, fontSize: 22, fontWeight: '500' },
+  promoText: { color: '#2A2200', fontSize: 20, lineHeight: 25, fontWeight: '400', marginTop: 4 },
   promoActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
   promoButton: { minHeight: 48, borderRadius: 8, backgroundColor: C.page, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' },
   promoButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500', textAlign: 'center' },

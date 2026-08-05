@@ -7,6 +7,8 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(scriptDir, '..');
 const outputDir = join(projectRoot, 'dist');
 const pwaSourceDir = join(projectRoot, 'public');
+const serviceWorkerSource = readFileSync(join(pwaSourceDir, 'sw.js'), 'utf8');
+const serviceWorkerVersion = serviceWorkerSource.match(/lesachi-pwa-v(\d+)/)?.[1] || '1';
 
 rmSync(outputDir, { recursive: true, force: true });
 mkdirSync(outputDir, { recursive: true });
@@ -97,7 +99,7 @@ const serviceWorkerRegistration = `
         window.location.reload();
       });
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js?v=13')
+        navigator.serviceWorker.register('./sw.js?v=${serviceWorkerVersion}')
           .then((registration) => registration.update())
           .catch(() => {});
       });
@@ -110,7 +112,10 @@ if (!indexHtml.includes('rel="manifest"')) {
 if (!indexHtml.includes('serviceWorker.register')) {
   indexHtml = indexHtml.replace('</body>', `${serviceWorkerRegistration}\n</body>`);
 }
-indexHtml = indexHtml.replace(/navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g, "navigator.serviceWorker.register('./sw.js?v=13')");
+indexHtml = indexHtml.replace(
+  /navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g,
+  `navigator.serviceWorker.register('./sw.js?v=${serviceWorkerVersion}')`,
+);
 
 writeFileSync(indexPath, indexHtml);
 console.log(`PWA build tayyor: ${outputDir}`);
