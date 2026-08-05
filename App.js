@@ -59,6 +59,7 @@ import {
   receiptSmsText,
   receiptText,
   rentalTotal,
+  returnedTotal,
 } from './src/utils';
 import { downloadReceiptPdf, printReceipt, sendSmsMessage } from './src/receiptActions';
 
@@ -250,7 +251,7 @@ function LesaApp({ db }) {
   }, []);
 
   const active = useMemo(() => rentals.filter((rental) => !isClosed(rental)), [rentals]);
-  const history = useMemo(() => rentals.filter(isClosed), [rentals]);
+  const history = useMemo(() => rentals.filter((rental) => returnedItems(rental).length > 0), [rentals]);
   const pendingRentals = useMemo(() => rentals.filter((rental) => pendingPaymentItems(rental).length > 0), [rentals]);
   const pendingPaymentCount = useMemo(() => pendingRentals.reduce((total, rental) => total + pendingPaymentItems(rental).length, 0), [pendingRentals]);
 
@@ -581,7 +582,7 @@ function LesaApp({ db }) {
         )}
         {screen === 'customers' && <Customers rentals={rentals} onRental={setSelected} />}
         {screen === 'history' && (
-          <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: 'final' } })} />
+          <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: isClosed(rental) ? 'final' : 'current' } })} />
         )}
         {screen === 'payments' && <Payments rentals={pendingRentals} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen(paymentsBackScreen)} onPay={confirmPaid} onRental={setSelected} />}
         {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} apkUrl={apkUrl} onSaveApkUrl={saveApkUrl} onPayments={() => openPayments('settings')} paymentPendingCount={pendingPaymentCount} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onDownloadApk={downloadApk} remoteMode={usesRemoteDatabase} />}
@@ -749,7 +750,7 @@ function RentalCard({ rental, onPress }) {
   const remainingItems = openItems(rental);
   const returnedQuantity = quantityOf(returnedItems(rental));
   const pendingItems = pendingPaymentItems(rental);
-  const days = dayCount(rental.startedAt);
+  const days = Math.max(...remainingItems.map((item) => dayCount(item.startedAt || rental.startedAt)), 1);
   const tone = statusTone(days);
   return (
     <Pressable style={({ pressed }) => [s.rentalCard, { borderLeftColor: tone.color }, pressed && s.pressed]} onPress={onPress}>
@@ -773,10 +774,21 @@ function History({ rentals, refreshing, onRefresh, onReceipt }) {
       data={rentals}
       keyExtractor={(item) => item.id}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green} />}
-      ListHeaderComponent={<><View style={s.topBrand}><Brand /></View><Header title="Ijara tarixi" subtitle="Yakunlangan hisob-kitoblar" /></>}
-      renderItem={({ item }) => <Pressable style={s.historyCard} onPress={() => onReceipt(item)}><View style={s.historyTop}><View style={s.avatar}><Text style={s.avatarText}>{initials(item.customerName)}</Text></View><View style={s.flex}><Text style={s.customerName}>{item.customerName}</Text><Text style={s.phone}>{formatDate(item.closedAt || new Date(), true)}</Text></View><View style={s.doneBadge}><Text style={[s.doneText, { color: pendingPaymentItems(item).length ? C.orange : C.successDark }]}>{pendingPaymentItems(item).length ? 'TO‘LOV KUTILMOQDA' : 'YOPILGAN'}</Text></View></View><View style={s.cardDivider} /><View style={s.historyBottom}><Text style={s.historyItems}>{item.items.length} turdagi anjom</Text><Text style={s.historyTotal}>{formatMoney(rentalTotal(item))}</Text></View></Pressable>}
+      ListHeaderComponent={<><View style={s.topBrand}><Brand /></View><Header title="Ijara tarixi" subtitle="Qaytarilgan anjomlar va muzlagan hisoblar" /></>}
+      renderItem={({ item }) => {
+        const returned = returnedItems(item);
+        const pending = pendingPaymentItems(item);
+        const partiallyOpen = openItems(item).length > 0;
+        const latestReturn = returned.reduce((latest, row) => {
+          const timestamp = new Date(row.returnedAt || 0).getTime();
+          return timestamp > latest ? timestamp : latest;
+        }, 0);
+        const status = pending.length ? 'TO‘LOV KUTILMOQDA' : partiallyOpen ? 'QISMAN QAYTDI' : 'YOPILGAN';
+        const statusColor = pending.length ? C.orange : partiallyOpen ? C.green2 : C.successDark;
+        return <Pressable style={s.historyCard} onPress={() => onReceipt(item)}><View style={s.historyTop}><View style={s.avatar}><Text style={s.avatarText}>{initials(item.customerName)}</Text></View><View style={s.flex}><Text style={s.customerName}>{item.customerName}</Text><Text style={s.phone}>{formatDate(latestReturn || item.closedAt || new Date(), true)}</Text></View><View style={s.doneBadge}><Text style={[s.doneText, { color: statusColor }]}>{status}</Text></View></View><View style={s.cardDivider} /><View style={s.historyBottom}><Text style={s.historyItems}>{quantityOf(returned)} dona qaytarilgan</Text><Text style={s.historyTotal}>{formatMoney(returnedTotal(item))}</Text></View>{pending.length > 0 && <Text style={[s.cardPaidNoteText, { color: C.orange, marginTop: 10 }]}>To‘lanishi kerak: {formatMoney(pendingPaymentTotal(item))}</Text>}</Pressable>;
+      }}
       ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
-      ListEmptyComponent={<Empty title="Tarix hozircha bo‘sh" text="To‘liq qaytarilgan ijaralar shu yerda ko‘rinadi." />}
+      ListEmptyComponent={<Empty title="Tarix hozircha bo‘sh" text="Qaytarilgan anjomlar shu yerda muzlagan summasi bilan ko‘rinadi." />}
     />
   );
 }

@@ -168,7 +168,10 @@ begin
     end if;
 
     started_at_value := source_item.started_at;
-    frozen_amount_value := greatest(1, (p_returned_at::date - started_at_value::date) + 1)
+    frozen_amount_value := greatest(1,
+      ((p_returned_at at time zone 'Asia/Samarkand')::date
+        - (started_at_value at time zone 'Asia/Samarkand')::date) + 1
+    )
       * source_item.daily_price * requested_quantity;
     remaining_quantity := source_item.quantity - requested_quantity;
 
@@ -177,6 +180,7 @@ begin
         status = 'returned',
         returned_at = p_returned_at,
         frozen_amount = frozen_amount_value,
+        paid_amount = 0,
         paid = false
     where id = source_item.id;
 
@@ -199,6 +203,7 @@ begin
       'status', 'returned',
       'returnedAt', p_returned_at,
       'frozenAmount', frozen_amount_value,
+      'paidAmount', 0,
       'paid', false
     ));
 
@@ -206,7 +211,7 @@ begin
       generated_item_id := 'item_' || substr(md5(random()::text || clock_timestamp()::text), 1, 24);
       insert into public.rental_items (
         id, rental_id, equipment_type_id, name, quantity, daily_price,
-        started_at, status, returned_at, frozen_amount, paid
+        started_at, status, returned_at, frozen_amount, paid_amount, paid
       ) values (
         generated_item_id,
         source_item.rental_id,
@@ -218,6 +223,7 @@ begin
         'open',
         null,
         null,
+        0,
         false
       );
     end if;
@@ -234,6 +240,7 @@ begin
     'status', ri.status,
     'returnedAt', ri.returned_at,
     'frozenAmount', ri.frozen_amount,
+    'paidAmount', ri.paid_amount,
     'paid', ri.paid
   ) order by ri.id), '[]'::jsonb)
   into remaining_rows

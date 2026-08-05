@@ -1,4 +1,5 @@
 export const DAY_MS = 86_400_000;
+export const BUSINESS_UTC_OFFSET_MS = 5 * 60 * 60 * 1000;
 
 export function createId(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -8,9 +9,18 @@ export function dayCount(from, to = new Date()) {
   const start = new Date(from || to);
   const end = new Date(to);
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return 1;
-  start.setHours(0, 0, 0, 0);
-  end.setHours(0, 0, 0, 0);
-  return Math.max(1, Math.floor((end - start) / DAY_MS) + 1);
+  // Uzbekistan has a fixed UTC+5 business day. Converting timestamps to a
+  // civil-day serial avoids DST/device-timezone errors and keeps the inclusive
+  // "olgan kun + qaytargan/bungi kun" rule identical on every device.
+  const civilDay = (date) => {
+    const shifted = new Date(date.getTime() + BUSINESS_UTC_OFFSET_MS);
+    return Math.floor(Date.UTC(
+      shifted.getUTCFullYear(),
+      shifted.getUTCMonth(),
+      shifted.getUTCDate(),
+    ) / DAY_MS);
+  };
+  return Math.max(1, civilDay(end) - civilDay(start) + 1);
 }
 
 function numberValue(value) {

@@ -1,4 +1,4 @@
-import { createId } from './utils';
+import { createId, dayCount } from './utils';
 
 const ITEM_STATUS = {
   OPEN: 'open',
@@ -11,9 +11,7 @@ function dayCountInclusive(from, to = new Date()) {
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
     throw new Error('Ijara sanasi noto‘g‘ri. Qaytarishni saqlab bo‘lmadi.');
   }
-  start.setHours(0, 0, 0, 0);
-  end.setHours(0, 0, 0, 0);
-  return Math.max(1, Math.floor((end - start) / 86_400_000) + 1);
+  return dayCount(start, end);
 }
 
 function numberOrNull(value) {

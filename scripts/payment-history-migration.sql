@@ -212,7 +212,10 @@ begin
     end if;
 
     started_at_value := source_item.started_at;
-    frozen_amount_value := greatest(1, (p_returned_at::date - started_at_value::date) + 1)
+    frozen_amount_value := greatest(1,
+      ((p_returned_at at time zone 'Asia/Samarkand')::date
+        - (started_at_value at time zone 'Asia/Samarkand')::date) + 1
+    )
       * source_item.daily_price * requested_quantity;
     remaining_quantity := source_item.quantity - requested_quantity;
 
