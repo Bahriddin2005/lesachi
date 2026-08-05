@@ -283,7 +283,7 @@ function LesaApp({ db }) {
     }
   };
 
-  const submitReceiptReturn = async (rental, returns) => {
+  const submitReceiptReturn = async (rental, returns, options = {}) => {
     try {
       const outcome = await registerReturn(db, rental.id, returns);
       const rows = await load(true);
@@ -298,37 +298,55 @@ function LesaApp({ db }) {
           returnedItemIds: outcome.returnedRows.map((item) => item.id),
         }),
       });
-      setReceipt({ rental: updated, context: outcome.receipt });
+      if (options.showReceipt !== false) setReceipt({ rental: updated, context: outcome.receipt });
       return { ok: true, rental: updated, outcome };
     } catch (error) {
       return { ok: false, error: error.message || 'Qaytarishni saqlab bo‘lmadi.' };
     }
   };
 
-  const submitReceiptPayment = async (rental, amount) => {
+  const submitReceiptPayment = async (rental, amount, options = {}) => {
     try {
       const payment = await recordRentalPayment(db, rental.id, amount, 'Admin');
       const rows = await load(true);
       const updated = rows.find((row) => row.id === rental.id);
       if (!updated) throw new Error('Yangilangan ijara topilmadi.');
-      setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      if (options.showReceipt !== false) setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
       return { ok: true, rental: updated, payment };
     } catch (error) {
       return { ok: false, error: error.message || 'To‘lovni saqlab bo‘lmadi.' };
     }
   };
 
-  const submitReceiptRecordEdit = async (rental, items) => {
+  const submitReceiptRecordEdit = async (rental, items, options = {}) => {
     try {
       const event = await editRentalRecord(db, rental.id, items, 'Admin');
       const rows = await load(true);
       const updated = rows.find((row) => row.id === rental.id);
       if (!updated) throw new Error('Yangilangan ijara topilmadi.');
-      setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      if (options.showReceipt !== false) setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
       return { ok: true, rental: updated, event };
     } catch (error) {
       return { ok: false, error: error.message || 'Ijara ma’lumotlarini saqlab bo‘lmadi.' };
     }
+  };
+
+  const submitDetailReturn = async (rental, returns) => {
+    const result = await submitReceiptReturn(rental, returns, { showReceipt: false });
+    if (result?.ok) setSelected(result.rental);
+    return result;
+  };
+
+  const submitDetailPayment = async (rental, amount) => {
+    const result = await submitReceiptPayment(rental, amount, { showReceipt: false });
+    if (result?.ok) setSelected(result.rental);
+    return result;
+  };
+
+  const submitDetailRecordEdit = async (rental, items) => {
+    const result = await submitReceiptRecordEdit(rental, items, { showReceipt: false });
+    if (result?.ok) setSelected(result.rental);
+    return result;
   };
 
   const confirmPaid = async (itemId) => {
@@ -552,9 +570,12 @@ function LesaApp({ db }) {
       <NewRentalModal open={newOpen} equipment={equipment} onClose={() => setNewOpen(false)} onSubmit={submitRental} />
       <RentalDetail
         rental={selected}
+        equipment={equipment}
         onClose={() => setSelected(null)}
-        onEdit={() => setEditTarget(selected)}
         onPay={confirmPaid}
+        onReturnAll={submitDetailReturn}
+        onPaymentAmount={submitDetailPayment}
+        onRecordEdit={submitDetailRecordEdit}
         onReceipt={(rental) => { setSelected(null); setReceipt({ rental, context: { type: isClosed(rental) ? 'final' : 'current' } }); }}
       />
       <RentalEditModal target={editTarget} equipment={equipment} onClose={() => setEditTarget(null)} onSubmit={submitEdit} />
@@ -1196,7 +1217,7 @@ function NewRentalModal({ open, equipment, onClose, onSubmit }) {
   );
 }
 
-function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
+function RentalDetail({ rental, equipment, onClose, onPay, onReturnAll, onPaymentAmount, onRecordEdit, onReceipt }) {
   const activeItems = rental ? openItems(rental) : [];
   const pendingItems = rental ? pendingPaymentItems(rental) : [];
   const paidItems = rental ? paidReturnedItems(rental) : [];
@@ -1205,11 +1226,17 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
   const [paymentTarget, setPaymentTarget] = useState(null);
   const [paymentBusy, setPaymentBusy] = useState(false);
   const [paymentError, setPaymentError] = useState('');
+  const [returnAllOpen, setReturnAllOpen] = useState(false);
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [recordEditOpen, setRecordEditOpen] = useState(false);
 
   useEffect(() => {
     setPaymentTarget(null);
     setPaymentBusy(false);
     setPaymentError('');
+    setReturnAllOpen(false);
+    setPaymentOpen(false);
+    setRecordEditOpen(false);
   }, [rental?.id]);
 
   const confirmDetailPayment = async () => {
@@ -1278,9 +1305,13 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
       })}</View>
     </>}
 
-    <Pressable style={s.returnButton} onPress={onEdit}><Text style={s.returnButtonText}>Tahrirlash</Text></Pressable>
+    <View style={[s.receiptRecordStack, s.detailRecordStack]}>
+      <Pressable disabled={!activeItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptEditButton, (pressed || !activeItems.length) && s.receiptRecordDisabled]} onPress={() => setRecordEditOpen(true)}><MaterialCommunityIcons name="pencil-outline" size={27} color={C.white} /><Text style={s.receiptEditButtonText}>Tahrirlash</Text></Pressable>
+      <Pressable disabled={!activeItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptReturnButton, (pressed || !activeItems.length) && s.receiptRecordDisabled]} onPress={() => setReturnAllOpen(true)}><MaterialCommunityIcons name="package-check" size={27} color={C.orange} /><Text style={s.receiptReturnButtonText}>Hammasi qaytarildi</Text></Pressable>
+      <Pressable disabled={pendingPaymentTotal(rental) <= 0} style={({ pressed }) => [s.receiptRecordButton, s.receiptPaidButton, (pressed || pendingPaymentTotal(rental) <= 0) && s.receiptRecordDisabled]} onPress={() => setPaymentOpen(true)}><MaterialCommunityIcons name="cash-check" size={27} color={C.white} /><Text style={s.receiptPaidButtonText}>To‘landi</Text></Pressable>
+    </View>
     <Pressable style={s.receiptButton} onPress={() => onReceipt(rental)}><Text style={s.receiptButtonText}>▧  {isClosed(rental) ? 'Yakuniy chekni ko‘rish' : 'Elektron chekni ko‘rish'}</Text></Pressable>
-  </ScrollView></SafeAreaView>}</Modal><PaymentConfirmModal target={paymentTarget} busy={paymentBusy} error={paymentError} onClose={closeDetailPayment} onConfirm={confirmDetailPayment} /></>;
+  </ScrollView></SafeAreaView>}</Modal><PaymentConfirmModal target={paymentTarget} busy={paymentBusy} error={paymentError} onClose={closeDetailPayment} onConfirm={confirmDetailPayment} /><AllReturnConfirmModal open={returnAllOpen} rental={rental} onClose={() => setReturnAllOpen(false)} onSubmit={onReturnAll} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPaymentAmount} /><RentalRecordEditModal open={recordEditOpen} rental={rental} equipment={equipment} onClose={() => setRecordEditOpen(false)} onSubmit={onRecordEdit} /></>;
 }
 
 function RentalEditModal({ target, equipment, onClose, onSubmit }) {
@@ -1710,7 +1741,7 @@ const s = StyleSheet.create({
   editSaveError: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, borderRadius: 12, padding: 12, marginBottom: 10 }, editSaveErrorText: { flex: 1, color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' },
   activityCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, activityRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.line }, activityIcon: { width: 42, height: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, activityIconPayment: { backgroundColor: '#14351F' }, activityIconReturn: { backgroundColor: '#382E0B' }, activityIconEdit: { backgroundColor: C.blueSoft }, activityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' }, activityMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 3 },
   receiptActivity: { marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.line }, receiptActivityRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }, receiptActivityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' },
-  receiptRecordStack: { gap: 9, marginBottom: 14 }, receiptRecordButton: { width: '100%', minHeight: 62, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 14 }, receiptReturnButton: { backgroundColor: C.card, borderWidth: 1, borderColor: C.orange }, receiptReturnButtonText: { color: C.orange, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptEditButton: { backgroundColor: C.green, borderWidth: 1, borderColor: C.green }, receiptEditButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptRecordDisabled: { opacity: .45 },
+  receiptRecordStack: { gap: 9, marginBottom: 14 }, detailRecordStack: { marginTop: 14, marginBottom: 0 }, receiptRecordButton: { width: '100%', minHeight: 62, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 14 }, receiptReturnButton: { backgroundColor: C.card, borderWidth: 1, borderColor: C.orange }, receiptReturnButtonText: { color: C.orange, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptEditButton: { backgroundColor: C.green, borderWidth: 1, borderColor: C.green }, receiptEditButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptRecordDisabled: { opacity: .45 },
   editHistoryNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 8, borderWidth: 1, borderColor: C.orange, backgroundColor: C.card, padding: 14, marginBottom: 12 }, editHistoryNoticeText: { flex: 1, color: C.ink, fontSize: 20, lineHeight: 25, fontWeight: '400' }, recordEditCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginBottom: 10 }, recordEditLabel: { color: C.muted, fontSize: 20, fontWeight: '500', letterSpacing: .7, marginTop: 10 }, recordEditStock: { color: C.green2, fontSize: 20, lineHeight: 24, marginBottom: 8 },
   returnAllConfirmCard: { width: '100%', maxWidth: 500, maxHeight: '88%', backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.orange, padding: 20 }, returnAllConfirmIcon: { width: 60, height: 60, borderRadius: 10, backgroundColor: '#382E0B', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, returnAllSummary: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 16 }, returnAllSummaryRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderBottomWidth: 1, borderBottomColor: C.line }, returnAllSummaryName: { flex: 1, color: C.ink, fontSize: 20, fontWeight: '400' }, returnAllSummaryQuantity: { color: C.orange, fontSize: 20, fontWeight: '500' }, returnAllTotalRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, returnAllTotalLabel: { color: C.muted, fontSize: 20, fontWeight: '500' }, returnAllTotalValue: { color: C.orange, fontSize: 22, fontWeight: '500' }, returnAllConfirmButton: { flex: 1, minHeight: 54, borderRadius: 8, backgroundColor: C.page, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 }, returnAllConfirmButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500', textAlign: 'center' },
   paymentEntryCard: { width: '100%', maxWidth: 470, backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.line, padding: 20 }, paymentEntryHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }, paymentEntryClose: { width: 42, height: 42, borderRadius: 8, backgroundColor: C.cardRaised, alignItems: 'center', justifyContent: 'center' }, paymentPendingBox: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.orange, borderRadius: 8, padding: 14, marginVertical: 16 }, paymentPendingLabel: { color: C.orange, fontSize: 20, fontWeight: '400' }, paymentPendingValue: { color: C.orange, fontSize: 26, fontWeight: '500', marginTop: 6 }, payAllButton: { minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: C.success, backgroundColor: '#14351F', alignItems: 'center', justifyContent: 'center', marginTop: -4 }, payAllButtonText: { color: C.successDark, fontSize: 20, fontWeight: '500' }, paymentHistoryHint: { color: C.muted, fontSize: 20, lineHeight: 25, marginTop: 12 },
