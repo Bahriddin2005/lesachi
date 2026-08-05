@@ -60,7 +60,7 @@ import {
   receiptText,
   rentalTotal,
 } from './src/utils';
-import { downloadReceiptPdf, printReceipt, sendReceiptSms, sendSmsMessage } from './src/receiptActions';
+import { downloadReceiptPdf, printReceipt, sendSmsMessage } from './src/receiptActions';
 
 const C = {
   green: '#1D4ED8',
@@ -176,8 +176,28 @@ function LesaApp({ db }) {
     try {
       await queueSms(db, payload);
       setSmsQueue(await fetchSmsQueue(db));
+      return true;
     } catch (queueError) {
       Alert.alert('SMS navbatga qo‘shilmadi', queueError.message || 'SMS matnini navbatga qo‘shib bo‘lmadi.');
+      return false;
+    }
+  };
+
+  const saveReceiptSnapshot = async (rental, context) => {
+    try {
+      const snapshot = await logSentMessage(
+        db,
+        rental.id,
+        'RECEIPT',
+        receiptText(rental, context),
+        context?.type || 'current',
+      );
+      const withSnapshot = { ...rental, receipts: [snapshot, ...(rental.receipts || [])] };
+      setRentals((rows) => rows.map((row) => row.id === rental.id ? withSnapshot : row));
+      return withSnapshot;
+    } catch (snapshotError) {
+      Alert.alert('Chek tarixi saqlanmadi', snapshotError.message || 'Chek nusxasini tarixga yozib bo‘lmadi.');
+      return rental;
     }
   };
 
@@ -239,8 +259,9 @@ function LesaApp({ db }) {
       const rentalId = await createRental(db, payload);
       setNewOpen(false);
       const rows = await load(true);
-      const created = rows.find((row) => row.id === rentalId);
+      let created = rows.find((row) => row.id === rentalId);
       if (created) {
+        created = await saveReceiptSnapshot(created, { type: 'new' });
         await enqueueSms({ rentalId: created.id, phone: created.phone, message: receiptSmsText(created, { type: 'new' }) });
         setTimeout(() => setReceipt({ rental: created, context: { type: 'new' } }), 350);
       }
@@ -255,10 +276,11 @@ function LesaApp({ db }) {
     try {
       const outcome = await editRental(db, rentalId, changes);
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === rentalId);
+      let updated = rows.find((row) => row.id === rentalId);
       setEditTarget(null);
       setSelected(null);
       if (updated) {
+        updated = await saveReceiptSnapshot(updated, outcome.receipt);
         if (outcome.returnedRows.length) {
           const returnType = outcome.wasClosed && !outcome.addedRows.length ? 'final' : 'partial';
           await enqueueSms({
@@ -287,8 +309,9 @@ function LesaApp({ db }) {
     try {
       const outcome = await registerReturn(db, rental.id, returns);
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === rental.id);
+      let updated = rows.find((row) => row.id === rental.id);
       if (!updated) throw new Error('Yangilangan ijara topilmadi.');
+      updated = await saveReceiptSnapshot(updated, outcome.receipt);
       const returnType = outcome.wasClosed ? 'final' : 'partial';
       await enqueueSms({
         rentalId: updated.id,
@@ -309,9 +332,11 @@ function LesaApp({ db }) {
     try {
       const payment = await recordRentalPayment(db, rental.id, amount, 'Admin');
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === rental.id);
+      let updated = rows.find((row) => row.id === rental.id);
       if (!updated) throw new Error('Yangilangan ijara topilmadi.');
-      if (options.showReceipt !== false) setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      const context = { type: isClosed(updated) ? 'final' : 'current' };
+      updated = await saveReceiptSnapshot(updated, context);
+      if (options.showReceipt !== false) setReceipt({ rental: updated, context });
       return { ok: true, rental: updated, payment };
     } catch (error) {
       return { ok: false, error: error.message || 'To‘lovni saqlab bo‘lmadi.' };
@@ -322,9 +347,11 @@ function LesaApp({ db }) {
     try {
       const event = await editRentalRecord(db, rental.id, items, 'Admin');
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === rental.id);
+      let updated = rows.find((row) => row.id === rental.id);
       if (!updated) throw new Error('Yangilangan ijara topilmadi.');
-      if (options.showReceipt !== false) setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      const context = { type: isClosed(updated) ? 'final' : 'current' };
+      updated = await saveReceiptSnapshot(updated, context);
+      if (options.showReceipt !== false) setReceipt({ rental: updated, context });
       return { ok: true, rental: updated, event };
     } catch (error) {
       return { ok: false, error: error.message || 'Ijara ma’lumotlarini saqlab bo‘lmadi.' };
@@ -515,12 +542,9 @@ function LesaApp({ db }) {
   const smsReceipt = async (receiptData) => {
     const { rental, context } = receiptData;
     const message = receiptSmsText(rental, context);
-    try {
-      const result = await sendReceiptSms(rental, context);
-      await logSentMessage(db, rental.id, 'SMS', result?.message || message, result?.result || 'unknown');
-    } catch (error) {
-      await logSentMessage(db, rental.id, 'SMS', message, 'error');
-      Alert.alert('SMS xatoligi', error.message || 'SMS oynasini ochib bo‘lmadi.');
+    const queued = await enqueueSms({ rentalId: rental.id, phone: rental.phone, message });
+    if (queued) {
+      Alert.alert('SMS navbatga qo‘shildi', 'Qisqa xabar SMS bo‘limida admin tasdig‘ini kutmoqda.');
     }
   };
 
@@ -658,6 +682,14 @@ function activityIcon(event) {
   if (event.type === 'payment') return { name: 'cash-check', color: C.successDark, style: s.activityIconPayment };
   if (event.type === 'edit') return { name: 'pencil-outline', color: C.green2, style: s.activityIconEdit };
   return { name: 'package-down', color: C.orange, style: s.activityIconReturn };
+}
+
+function receiptHistoryTitle(type) {
+  if (type === 'new') return 'Yangi ijara cheki';
+  if (type === 'partial') return 'Qisman qaytarish cheki';
+  if (type === 'edit') return 'Ijara o‘zgarishi cheki';
+  if (type === 'final') return 'Yakuniy chek';
+  return 'Joriy holat cheki';
 }
 
 function statusTone(days) {
@@ -1222,6 +1254,7 @@ function RentalDetail({ rental, equipment, onClose, onPay, onReturnAll, onPaymen
   const pendingItems = rental ? pendingPaymentItems(rental) : [];
   const paidItems = rental ? paidReturnedItems(rental) : [];
   const activity = Array.isArray(rental?.activity) ? rental.activity : [];
+  const receipts = Array.isArray(rental?.receipts) ? rental.receipts : [];
   const activeQuantity = quantityOf(activeItems);
   const [paymentTarget, setPaymentTarget] = useState(null);
   const [paymentBusy, setPaymentBusy] = useState(false);
@@ -1229,6 +1262,7 @@ function RentalDetail({ rental, equipment, onClose, onPay, onReturnAll, onPaymen
   const [returnAllOpen, setReturnAllOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [recordEditOpen, setRecordEditOpen] = useState(false);
+  const [historyReceipt, setHistoryReceipt] = useState(null);
 
   useEffect(() => {
     setPaymentTarget(null);
@@ -1237,6 +1271,7 @@ function RentalDetail({ rental, equipment, onClose, onPay, onReturnAll, onPaymen
     setReturnAllOpen(false);
     setPaymentOpen(false);
     setRecordEditOpen(false);
+    setHistoryReceipt(null);
   }, [rental?.id]);
 
   const confirmDetailPayment = async () => {
@@ -1305,13 +1340,22 @@ function RentalDetail({ rental, equipment, onClose, onPay, onReturnAll, onPaymen
       })}</View>
     </>}
 
+    {receipts.length > 0 && <>
+      <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>Cheklar tarixi</Text><Text style={s.detailSectionCount}>{receipts.length} ta chek</Text></View>
+      <View style={s.receiptHistoryCard}>{receipts.map((savedReceipt) => <Pressable key={savedReceipt.id} style={s.receiptHistoryRow} onPress={() => setHistoryReceipt(savedReceipt)}><View style={s.flex}><Text style={s.activityTitle}>{receiptHistoryTitle(savedReceipt.type)}</Text><Text style={s.activityMeta}>{formatDate(savedReceipt.createdAt, true)}</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>)}</View>
+    </>}
+
     <View style={[s.receiptRecordStack, s.detailRecordStack]}>
       <Pressable disabled={!activeItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptEditButton, (pressed || !activeItems.length) && s.receiptRecordDisabled]} onPress={() => setRecordEditOpen(true)}><MaterialCommunityIcons name="pencil-outline" size={27} color={C.white} /><Text style={s.receiptEditButtonText}>Tahrirlash</Text></Pressable>
       <Pressable disabled={!activeItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptReturnButton, (pressed || !activeItems.length) && s.receiptRecordDisabled]} onPress={() => setReturnAllOpen(true)}><MaterialCommunityIcons name="package-check" size={27} color={C.orange} /><Text style={s.receiptReturnButtonText}>Hammasi qaytarildi</Text></Pressable>
       <Pressable disabled={pendingPaymentTotal(rental) <= 0} style={({ pressed }) => [s.receiptRecordButton, s.receiptPaidButton, (pressed || pendingPaymentTotal(rental) <= 0) && s.receiptRecordDisabled]} onPress={() => setPaymentOpen(true)}><MaterialCommunityIcons name="cash-check" size={27} color={C.white} /><Text style={s.receiptPaidButtonText}>To‘landi</Text></Pressable>
     </View>
     <Pressable style={s.receiptButton} onPress={() => onReceipt(rental)}><Text style={s.receiptButtonText}>▧  {isClosed(rental) ? 'Yakuniy chekni ko‘rish' : 'Elektron chekni ko‘rish'}</Text></Pressable>
-  </ScrollView></SafeAreaView>}</Modal><PaymentConfirmModal target={paymentTarget} busy={paymentBusy} error={paymentError} onClose={closeDetailPayment} onConfirm={confirmDetailPayment} /><AllReturnConfirmModal open={returnAllOpen} rental={rental} onClose={() => setReturnAllOpen(false)} onSubmit={onReturnAll} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPaymentAmount} /><RentalRecordEditModal open={recordEditOpen} rental={rental} equipment={equipment} onClose={() => setRecordEditOpen(false)} onSubmit={onRecordEdit} /></>;
+  </ScrollView></SafeAreaView>}</Modal><PaymentConfirmModal target={paymentTarget} busy={paymentBusy} error={paymentError} onClose={closeDetailPayment} onConfirm={confirmDetailPayment} /><AllReturnConfirmModal open={returnAllOpen} rental={rental} onClose={() => setReturnAllOpen(false)} onSubmit={onReturnAll} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPaymentAmount} /><RentalRecordEditModal open={recordEditOpen} rental={rental} equipment={equipment} onClose={() => setRecordEditOpen(false)} onSubmit={onRecordEdit} /><ReceiptHistoryModal receipt={historyReceipt} onClose={() => setHistoryReceipt(null)} /></>;
+}
+
+function ReceiptHistoryModal({ receipt, onClose }) {
+  return <Modal visible={Boolean(receipt)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{receipt && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}><ModalHeader title={receiptHistoryTitle(receipt.type)} subtitle={formatDate(receipt.createdAt, true)} onClose={onClose} /><View style={s.savedReceiptPaper}><Text selectable style={s.savedReceiptText}>{receipt.message}</Text></View></ScrollView></SafeAreaView>}</Modal>;
 }
 
 function RentalEditModal({ target, equipment, onClose, onSubmit }) {
@@ -1485,11 +1529,11 @@ function ReceiptModal({ receipt, channel, equipment, onClose, onDownload, onPrin
     <ModalHeader title={title} subtitle={isEdit ? 'Qaytarish va qo‘shimcha anjomlar' : isPartial ? 'Qaytarilgan qism bo‘yicha to‘lov' : isFinal ? 'Barcha anjomlar qaytarilgan' : 'Hisob real vaqtda yangilanadi'} onClose={onClose} />
     <View style={s.receiptPaper}>
       <View style={s.receiptHead}><Brand /><Text style={s.receiptNumber}>#{rental.id.slice(-8).toUpperCase()}</Text></View>
-      <View style={s.receiptCustomer}><Text style={s.receiptName}>{rental.customerName}</Text><Text style={s.phone}>{rental.phone}</Text><Text style={s.receiptDate}>{formatDate(new Date(), true)}</Text></View>
+      <View style={s.receiptCustomer}><Text style={s.receiptName}>{rental.customerName}</Text><Text style={s.phone}>{rental.phone}</Text><Text style={s.receiptDate}>Olindi: {formatDate(rental.startedAt, true)}</Text><Text style={s.receiptDate}>Hisob sanasi: {formatDate(new Date(), true)}</Text></View>
 
       {returned.length > 0 && <>
         <Text style={s.receiptSectionTitle}>{isPartial ? 'QAYTARILGAN QISM' : 'QAYTARILGAN ANJOMLAR'}</Text>
-        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>{item.paid ? '✓' : item.paidAmount > 0 ? '◐' : '◷'} {item.name}</Text><Text style={s.receiptItemSub}>{receiptCalculationText(item)} · {item.paid ? 'TO‘LANDI' : item.paidAmount > 0 ? `${formatMoney(item.paidAmount)} TO‘LANDI · ${formatMoney(item.outstandingAmount)} QOLDI` : 'TO‘LOV KUTILMOQDA'}</Text></View></View>)}
+        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>{item.paid ? '✓' : item.paidAmount > 0 ? '◐' : '◷'} {item.name}</Text><Text style={s.receiptItemSub}>{receiptCalculationText(item)} · qaytarildi</Text><Text style={s.receiptItemSub}>{item.paid ? 'TO‘LANDI' : item.paidAmount > 0 ? `${formatMoney(item.paidAmount)} TO‘LANDI · ${formatMoney(item.outstandingAmount)} QOLDI` : '⏳ TO‘LOV KUTILMOQDA'}</Text></View></View>)}
       </>}
 
       {isEdit && added.length > 0 && <>
@@ -1499,7 +1543,7 @@ function ReceiptModal({ receipt, channel, equipment, onClose, onDownload, onPrin
 
       {!isFinal && remaining.length > 0 && <View style={[s.receiptCurrentBlock, { backgroundColor: C.card, borderColor: C.redLine }]}>
         <Text style={[s.receiptCurrentTitle, { color: C.redDark }]}>JORIY QARZ — O‘SISHDA DAVOM ETMOQDA</Text>
-        {remaining.map((item) => <View key={item.id} style={s.receiptOpenRow}><Text style={s.receiptItemName}>{item.name}</Text><Text style={[s.receiptItemSub, { color: C.redDark }]}>{receiptCalculationText(item)}</Text></View>)}
+        {remaining.map((item) => <View key={item.id} style={s.receiptOpenRow}><Text style={s.receiptItemName}>{item.name}</Text><Text style={[s.receiptItemSub, { color: C.redDark }]}>{receiptCalculationText(item)} · hozircha mijozda</Text></View>)}
         <Text style={[s.receiptCurrentTotal, { color: C.redDark, borderTopColor: C.redLine }]}>{formatMoney(current)}</Text>
         {isPartial && <Text style={s.receiptReminder}>Qolgan {quantityOf(remaining)} dona anjom qaytarilmaguncha, kunlik hisob davom etadi.</Text>}
       </View>}
@@ -1512,6 +1556,7 @@ function ReceiptModal({ receipt, channel, equipment, onClose, onDownload, onPrin
       {activity.length > 0 && <View style={s.receiptActivity}><Text style={s.receiptSectionTitle}>AMALLAR TARIXI</Text>{activity.map((event) => <View key={event.id} style={s.receiptActivityRow}><Text style={s.receiptActivityTitle}>{activityTitle(event, true)}</Text><Text style={s.receiptItemSub}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>)}</View>}
     </View>
     <View style={s.receiptActionGrid}><ReceiptAction icon="↓" label="PDF yuklab olish" primary busy={busy === 'pdf'} disabled={Boolean(busy)} onPress={() => run('pdf', onDownload)} /><ReceiptAction icon="▣" label="Chop etish" busy={busy === 'print'} disabled={Boolean(busy)} onPress={() => run('print', onPrint)} /><ReceiptAction icon="✉" label="SMS yuborish" orange busy={busy === 'sms'} disabled={Boolean(busy)} onPress={() => run('sms', onSms)} /></View>
+    <Text style={s.smsQueueHint}>SMS tugmasi 160 belgigacha qisqa xabarni navbatga qo‘yadi. Yuborish SMS bo‘limida tasdiqlanadi.</Text>
     <View style={s.receiptRecordStack}>
       <Pressable disabled={Boolean(busy) || !returnableItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptEditButton, (pressed || !returnableItems.length) && s.receiptRecordDisabled]} onPress={() => setRecordEditOpen(true)}><MaterialCommunityIcons name="pencil-outline" size={27} color={C.white} /><Text style={s.receiptEditButtonText}>Tahrirlash</Text></Pressable>
       <Pressable disabled={Boolean(busy) || !returnableItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptReturnButton, (pressed || !returnableItems.length) && s.receiptRecordDisabled]} onPress={() => setReturnAllOpen(true)}><MaterialCommunityIcons name="package-check" size={27} color={C.orange} /><Text style={s.receiptReturnButtonText}>Hammasi qaytarildi</Text></Pressable>
@@ -1740,12 +1785,13 @@ const s = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(17,24,39,.48)', justifyContent: 'flex-end' }, returnSheet: { maxHeight: '89%', backgroundColor: C.page, padding: 18, paddingBottom: Platform.OS === 'ios' ? 32 : 20, borderTopLeftRadius: 8, borderTopRightRadius: 8 }, returnHint: { fontSize: 20, lineHeight: 24, color: C.pageMuted, fontWeight: '400', marginBottom: 12 }, returnItemsScroll: { flexGrow: 0, marginBottom: 13 }, returnItemsList: { gap: 8 }, returnItemCard: { backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.line, padding: 16 }, returnItemHeading: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', marginBottom: 9 }, returnItemMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, returnMax: { color: C.green2, fontSize: 20, fontWeight: '400' },
   editSaveError: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, borderRadius: 12, padding: 12, marginBottom: 10 }, editSaveErrorText: { flex: 1, color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' },
   activityCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, activityRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.line }, activityIcon: { width: 42, height: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, activityIconPayment: { backgroundColor: '#14351F' }, activityIconReturn: { backgroundColor: '#382E0B' }, activityIconEdit: { backgroundColor: C.blueSoft }, activityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' }, activityMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 3 },
+  receiptHistoryCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, receiptHistoryRow: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.line }, savedReceiptPaper: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 18 }, savedReceiptText: { color: C.ink, fontSize: 20, lineHeight: 29, fontWeight: '400' },
   receiptActivity: { marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.line }, receiptActivityRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }, receiptActivityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' },
   receiptRecordStack: { gap: 9, marginBottom: 14 }, detailRecordStack: { marginTop: 14, marginBottom: 0 }, receiptRecordButton: { width: '100%', minHeight: 62, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 14 }, receiptReturnButton: { backgroundColor: C.card, borderWidth: 1, borderColor: C.orange }, receiptReturnButtonText: { color: C.orange, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptEditButton: { backgroundColor: C.green, borderWidth: 1, borderColor: C.green }, receiptEditButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptRecordDisabled: { opacity: .45 },
   editHistoryNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 8, borderWidth: 1, borderColor: C.orange, backgroundColor: C.card, padding: 14, marginBottom: 12 }, editHistoryNoticeText: { flex: 1, color: C.ink, fontSize: 20, lineHeight: 25, fontWeight: '400' }, recordEditCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginBottom: 10 }, recordEditLabel: { color: C.muted, fontSize: 20, fontWeight: '500', letterSpacing: .7, marginTop: 10 }, recordEditStock: { color: C.green2, fontSize: 20, lineHeight: 24, marginBottom: 8 },
   returnAllConfirmCard: { width: '100%', maxWidth: 500, maxHeight: '88%', backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.orange, padding: 20 }, returnAllConfirmIcon: { width: 60, height: 60, borderRadius: 10, backgroundColor: '#382E0B', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, returnAllSummary: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 16 }, returnAllSummaryRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderBottomWidth: 1, borderBottomColor: C.line }, returnAllSummaryName: { flex: 1, color: C.ink, fontSize: 20, fontWeight: '400' }, returnAllSummaryQuantity: { color: C.orange, fontSize: 20, fontWeight: '500' }, returnAllTotalRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, returnAllTotalLabel: { color: C.muted, fontSize: 20, fontWeight: '500' }, returnAllTotalValue: { color: C.orange, fontSize: 22, fontWeight: '500' }, returnAllConfirmButton: { flex: 1, minHeight: 54, borderRadius: 8, backgroundColor: C.page, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 }, returnAllConfirmButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500', textAlign: 'center' },
   paymentEntryCard: { width: '100%', maxWidth: 470, backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.line, padding: 20 }, paymentEntryHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }, paymentEntryClose: { width: 42, height: 42, borderRadius: 8, backgroundColor: C.cardRaised, alignItems: 'center', justifyContent: 'center' }, paymentPendingBox: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.orange, borderRadius: 8, padding: 14, marginVertical: 16 }, paymentPendingLabel: { color: C.orange, fontSize: 20, fontWeight: '400' }, paymentPendingValue: { color: C.orange, fontSize: 26, fontWeight: '500', marginTop: 6 }, payAllButton: { minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: C.success, backgroundColor: '#14351F', alignItems: 'center', justifyContent: 'center', marginTop: -4 }, payAllButtonText: { color: C.successDark, fontSize: 20, fontWeight: '500' }, paymentHistoryHint: { color: C.muted, fontSize: 20, lineHeight: 25, marginTop: 12 },
-  receiptPaper: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 18, marginBottom: 13 }, receiptHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderStyle: 'dashed', borderBottomColor: C.line }, receiptNumber: { color: C.muted, fontSize: 20, fontWeight: '400' }, receiptCustomer: { alignItems: 'center', paddingVertical: 17 }, receiptName: { color: C.ink, fontSize: 20, fontWeight: '500' }, receiptDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 7 }, receiptSectionTitle: { color: C.green2, fontSize: 20, letterSpacing: .8, fontWeight: '400', marginBottom: 2 }, receiptRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: C.line }, receiptItemName: { color: C.ink, fontSize: 20, fontWeight: '400' }, receiptItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, receiptPaidAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentBlock: { marginTop: 12, backgroundColor: C.cardRaised, borderRadius: 8, padding: 12, borderWidth: 1, borderColor: C.blueLine }, receiptCurrentTitle: { color: C.green2, fontSize: 20, letterSpacing: .45, fontWeight: '400', marginBottom: 7 }, receiptOpenRow: { paddingVertical: 8, borderTopWidth: 1, borderTopColor: C.line }, receiptOpenAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentTotal: { color: C.green2, fontWeight: '500', fontSize: 20.8, textAlign: 'right', paddingTop: 8, marginTop: 4, borderTopWidth: 1, borderTopColor: C.blueLine }, receiptReminder: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 10 }, receiptGrand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 15, marginTop: 13, borderTopWidth: 1, borderTopColor: C.ink }, receiptGrandLabel: { color: C.ink, fontSize: 20, fontWeight: '500', maxWidth: '56%' }, receiptGrandValue: { color: C.green2, fontSize: 23.3, fontWeight: '500' }, receiptActionGrid: { flexDirection: 'row', gap: 8, marginBottom: 13 }, receiptAction: { flex: 1, minHeight: 78, paddingVertical: 11, paddingHorizontal: 8, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: C.card }, receiptActionPrimary: { backgroundColor: C.green, borderColor: C.green }, receiptActionOrange: { borderColor: C.blueLine, backgroundColor: C.card }, receiptActionIcon: { color: C.green2, fontSize: 22.1, fontWeight: '400' }, receiptActionLabel: { color: C.green2, fontSize: 20, textAlign: 'center', fontWeight: '400' }, shareHint: { textAlign: 'center', color: C.pageMuted, fontSize: 20, fontWeight: '400', marginBottom: 10 }, shareButton: { minHeight: 44, borderRadius: 8, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card }, shareButtonText: { color: C.green2, fontSize: 20, fontWeight: '400' },
+  receiptPaper: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 18, marginBottom: 13 }, receiptHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderStyle: 'dashed', borderBottomColor: C.line }, receiptNumber: { color: C.muted, fontSize: 20, fontWeight: '400' }, receiptCustomer: { alignItems: 'center', paddingVertical: 17 }, receiptName: { color: C.ink, fontSize: 20, fontWeight: '500' }, receiptDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 7 }, receiptSectionTitle: { color: C.green2, fontSize: 20, letterSpacing: .8, fontWeight: '400', marginBottom: 2 }, receiptRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: C.line }, receiptItemName: { color: C.ink, fontSize: 20, fontWeight: '400' }, receiptItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, receiptPaidAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentBlock: { marginTop: 12, backgroundColor: C.cardRaised, borderRadius: 8, padding: 12, borderWidth: 1, borderColor: C.blueLine }, receiptCurrentTitle: { color: C.green2, fontSize: 20, letterSpacing: .45, fontWeight: '400', marginBottom: 7 }, receiptOpenRow: { paddingVertical: 8, borderTopWidth: 1, borderTopColor: C.line }, receiptOpenAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentTotal: { color: C.green2, fontWeight: '500', fontSize: 20.8, textAlign: 'right', paddingTop: 8, marginTop: 4, borderTopWidth: 1, borderTopColor: C.blueLine }, receiptReminder: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 10 }, receiptGrand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 15, marginTop: 13, borderTopWidth: 1, borderTopColor: C.ink }, receiptGrandLabel: { color: C.ink, fontSize: 20, fontWeight: '500', maxWidth: '56%' }, receiptGrandValue: { color: C.green2, fontSize: 23.3, fontWeight: '500' }, receiptActionGrid: { flexDirection: 'row', gap: 8, marginBottom: 9 }, receiptAction: { flex: 1, minHeight: 78, paddingVertical: 11, paddingHorizontal: 8, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: C.card }, receiptActionPrimary: { backgroundColor: C.green, borderColor: C.green }, receiptActionOrange: { borderColor: C.blueLine, backgroundColor: C.card }, receiptActionIcon: { color: C.green2, fontSize: 22.1, fontWeight: '400' }, receiptActionLabel: { color: C.green2, fontSize: 20, textAlign: 'center', fontWeight: '400' }, smsQueueHint: { color: C.pageMuted, fontSize: 20, lineHeight: 25, textAlign: 'center', marginBottom: 13 }, shareHint: { textAlign: 'center', color: C.pageMuted, fontSize: 20, fontWeight: '400', marginBottom: 10 }, shareButton: { minHeight: 44, borderRadius: 8, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card }, shareButtonText: { color: C.green2, fontSize: 20, fontWeight: '400' },
 });
 
 const installS = StyleSheet.create({

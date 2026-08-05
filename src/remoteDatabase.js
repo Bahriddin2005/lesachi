@@ -159,11 +159,12 @@ function normaliseAddedItems(additions) {
 
 export async function fetchRentals() {
   const db = requireClient();
-  const [rentals, customers, items, events] = await Promise.all([
+  const [rentals, customers, items, events, receipts] = await Promise.all([
     unwrap(db.from('rentals').select('*').order('started_at', { ascending: false })),
     unwrap(db.from('customers').select('*')),
     unwrap(db.from('rental_items').select('*').gt('quantity', 0).order('rental_id').order('id')),
     unwrap(db.from('rental_events').select('*').order('created_at', { ascending: false })),
+    unwrap(db.from('sent_messages').select('id,rental_id,message,status,created_at').eq('channel', 'RECEIPT').order('created_at', { ascending: false })),
   ]);
   const customerById = new Map((customers || []).map((row) => [row.id, row]));
   const itemsByRental = (items || []).reduce((map, row) => {
@@ -178,6 +179,18 @@ export async function fetchRentals() {
     map[event.rentalId].push(event);
     return map;
   }, {});
+  const receiptsByRental = (receipts || []).reduce((map, row) => {
+    const receipt = {
+      id: row.id,
+      rentalId: row.rental_id,
+      message: row.message,
+      type: row.status,
+      createdAt: row.created_at,
+    };
+    if (!map[receipt.rentalId]) map[receipt.rentalId] = [];
+    map[receipt.rentalId].push(receipt);
+    return map;
+  }, {});
   return (rentals || []).map((row) => {
     const customer = customerById.get(row.customer_id) || {};
     return {
@@ -189,6 +202,7 @@ export async function fetchRentals() {
       phone: customer.phone || '',
       items: itemsByRental[row.id] || [],
       activity: eventsByRental[row.id] || [],
+      receipts: receiptsByRental[row.id] || [],
     };
   });
 }
@@ -412,14 +426,17 @@ export async function setSetting(key, value) {
 }
 
 export async function logSentMessage(rentalId, channel, message, status = 'sent') {
+  const id = createId('message');
+  const createdAt = new Date().toISOString();
   await unwrap(requireClient().from('sent_messages').insert({
-    id: createId('message'),
+    id,
     rental_id: rentalId,
     channel,
     message,
     status,
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
   }));
+  return { id, rentalId, channel, message, status, type: status, createdAt };
 }
 
 export async function queueSms(payload) {

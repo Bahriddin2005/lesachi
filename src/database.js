@@ -609,10 +609,22 @@ export async function fetchRentals(db) {
     map[event.rentalId].push(event);
     return map;
   }, {});
+  const receiptRows = await db.getAllAsync(`
+    SELECT id, rental_id AS rentalId, message, status AS type, created_at AS createdAt
+    FROM sent_messages
+    WHERE channel = 'RECEIPT'
+    ORDER BY created_at DESC
+  `);
+  const receiptsByRental = receiptRows.reduce((map, receipt) => {
+    if (!map[receipt.rentalId]) map[receipt.rentalId] = [];
+    map[receipt.rentalId].push(receipt);
+    return map;
+  }, {});
   return rentals.map((rental) => ({
     ...rental,
     items: itemsByRental[rental.id] || [],
     activity: eventsByRental[rental.id] || [],
+    receipts: receiptsByRental[rental.id] || [],
   }));
 }
 
@@ -1195,10 +1207,13 @@ export async function setSetting(db, key, value) {
 }
 
 export async function logSentMessage(db, rentalId, channel, message, status = 'sent') {
+  const id = createId('message');
+  const createdAt = new Date().toISOString();
   await db.runAsync(
     'INSERT INTO sent_messages (id, rental_id, channel, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    [createId('message'), rentalId, channel, message, status, new Date().toISOString()],
+    [id, rentalId, channel, message, status, createdAt],
   );
+  return { id, rentalId, channel, message, status, type: status, createdAt };
 }
 
 export async function queueSms(db, payload) {
