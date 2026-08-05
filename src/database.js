@@ -33,7 +33,7 @@ function toRentalItem(row) {
     status,
     returnedAt: row.returnedAt || null,
     frozenAmount: numberOrNull(row.frozenAmount),
-    paid: Boolean(row.paid),
+    paid: row.paid === true || Number(row.paid) === 1,
   };
 
   // Kept for callers from the first app version. New UI should use status,
