@@ -568,6 +568,183 @@ export async function createRental(db, payload) {
   return rentalId;
 }
 
+function normaliseAddedItems(additions) {
+  const source = Array.isArray(additions) ? additions : [];
+  const byType = new Map();
+  for (const entry of source) {
+    const equipmentTypeId = String(entry?.equipmentTypeId || '').trim();
+    if (!equipmentTypeId) throw new Error('Yangi anjom turini tanlang.');
+    const rawQuantity = entry?.quantity;
+    const quantity = Number(rawQuantity);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      throw new Error('Qo‘shiladigan anjom sonini to‘g‘ri kiriting.');
+    }
+    const dailyPrice = Number(entry?.dailyPrice);
+    if (!Number.isSafeInteger(dailyPrice) || dailyPrice < 0) {
+      throw new Error('Anjomning kunlik narxi noto‘g‘ri.');
+    }
+    const previous = byType.get(equipmentTypeId);
+    byType.set(equipmentTypeId, {
+      equipmentTypeId,
+      name: String(entry?.name || '').trim(),
+      dailyPrice,
+      quantity: (previous?.quantity || 0) + quantity,
+    });
+  }
+  return Array.from(byType.values());
+}
+
+/**
+ * Atomically applies returns and additional items to an existing rental.
+ * A returned source row is frozen/split first, then every new item starts at
+ * the same timestamp. This is used by the unified customer edit modal.
+ */
+export async function editRental(db, rentalId, changes = {}) {
+  const rawReturns = Array.isArray(changes.returns) ? changes.returns : [];
+  const returns = rawReturns.filter((entry) => Number(entry?.quantity || 0) > 0).length
+    ? normaliseReturnRequests(rawReturns.filter((entry) => Number(entry?.quantity || 0) > 0))
+    : [];
+  const additions = normaliseAddedItems(changes.additions);
+  if (!returns.length && !additions.length) {
+    throw new Error('Hech qanday o‘zgarish kiritilmadi.');
+  }
+
+  const changedAt = new Date().toISOString();
+  const returnedRows = [];
+  const addedRows = [];
+  let remainingRows = [];
+  let wasClosed = false;
+
+  await withWriteTransaction(db, async (tx) => {
+    const rental = await tx.getFirstAsync(
+      'SELECT id, started_at AS startedAt FROM rentals WHERE id = ?',
+      [rentalId],
+    );
+    if (!rental) throw new Error('Ijara topilmadi.');
+
+    const sourceItems = [];
+    const releasedByType = new Map();
+    for (const request of returns) {
+      const source = await tx.getFirstAsync(`
+        SELECT
+          ri.id,
+          ri.rental_id AS rentalId,
+          ri.equipment_type_id AS equipmentTypeId,
+          ri.name,
+          ri.quantity,
+          ri.daily_price AS dailyPrice,
+          COALESCE(ri.started_at, r.started_at) AS startedAt,
+          ri.status,
+          ri.returned_at AS returnedAt,
+          ri.frozen_amount AS frozenAmount
+        FROM rental_items ri
+        JOIN rentals r ON r.id = ri.rental_id
+        WHERE ri.id = ? AND ri.rental_id = ?
+      `, [request.itemId, rentalId]);
+      if (!source || source.status !== ITEM_STATUS.OPEN || Number(source.quantity) <= 0) {
+        throw new Error('Anjom allaqachon qaytarilgan yoki topilmadi.');
+      }
+      if (request.quantity > Number(source.quantity)) {
+        throw new Error(`${source.name}: mijozdagi ${source.quantity} donadan ko‘p qaytarib bo‘lmaydi.`);
+      }
+      sourceItems.push({ source, quantity: request.quantity });
+      if (source.equipmentTypeId) {
+        releasedByType.set(source.equipmentTypeId, (releasedByType.get(source.equipmentTypeId) || 0) + request.quantity);
+      }
+    }
+
+    for (const addition of additions) {
+      const type = await tx.getFirstAsync(
+        'SELECT id, name, daily_price AS dailyPrice, total_quantity AS totalQuantity FROM equipment_types WHERE id = ?',
+        [addition.equipmentTypeId],
+      );
+      if (!type) throw new Error('Qo‘shiladigan anjom omborda topilmadi.');
+      const usage = await tx.getFirstAsync(`
+        SELECT COALESCE(SUM(ri.quantity), 0) AS rentedQuantity
+        FROM rental_items ri
+        JOIN rentals r ON r.id = ri.rental_id
+        WHERE ri.equipment_type_id = ?
+          AND ri.status = 'open'
+          AND ri.quantity > 0
+          AND r.status <> 'closed'
+      `, [addition.equipmentTypeId]);
+      const totalQuantity = Number(type.totalQuantity) || 0;
+      const rentedQuantity = Number(usage?.rentedQuantity) || 0;
+      const available = totalQuantity - rentedQuantity + (releasedByType.get(addition.equipmentTypeId) || 0);
+      if (addition.quantity > available) {
+        throw new Error(`${type.name}: omborda faqat ${Math.max(0, available)} dona mavjud.`);
+      }
+      addition.name = type.name;
+      addition.dailyPrice = Number(type.dailyPrice) || 0;
+    }
+
+    for (const { source, quantity } of sourceItems) {
+      const startedAt = source.startedAt || rental.startedAt || changedAt;
+      const frozenAmount = Math.round(dayCountInclusive(startedAt, changedAt) * Number(source.dailyPrice) * quantity);
+      const remainingQuantity = Number(source.quantity) - quantity;
+      await tx.runAsync(`
+        UPDATE rental_items
+        SET quantity = ?, status = ?, returned_at = ?, frozen_amount = ?
+        WHERE id = ? AND rental_id = ?
+      `, [quantity, ITEM_STATUS.RETURNED, changedAt, frozenAmount, source.id, rentalId]);
+      returnedRows.push(toRentalItem({ ...source, quantity, startedAt, status: ITEM_STATUS.RETURNED, returnedAt: changedAt, frozenAmount }));
+      if (remainingQuantity > 0) {
+        await tx.runAsync(`
+          INSERT INTO rental_items (
+            id, rental_id, equipment_type_id, name, quantity, daily_price,
+            started_at, status, returned_at, frozen_amount
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+        `, [createId('item'), rentalId, source.equipmentTypeId, source.name, remainingQuantity, source.dailyPrice, startedAt, ITEM_STATUS.OPEN]);
+      }
+    }
+
+    for (const addition of additions) {
+      const id = createId('item');
+      await tx.runAsync(`
+        INSERT INTO rental_items (
+          id, rental_id, equipment_type_id, name, quantity, daily_price,
+          started_at, status, returned_at, frozen_amount
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+      `, [id, rentalId, addition.equipmentTypeId, addition.name, addition.quantity, addition.dailyPrice, changedAt, ITEM_STATUS.OPEN]);
+      addedRows.push(toRentalItem({
+        id,
+        rentalId,
+        equipmentTypeId: addition.equipmentTypeId,
+        name: addition.name,
+        quantity: addition.quantity,
+        dailyPrice: addition.dailyPrice,
+        startedAt: changedAt,
+        status: ITEM_STATUS.OPEN,
+      }));
+    }
+
+    remainingRows = await fetchOpenItemsForRental(tx, rentalId);
+    wasClosed = remainingRows.length === 0;
+    await tx.runAsync(
+      wasClosed
+        ? "UPDATE rentals SET status = 'closed', closed_at = ? WHERE id = ?"
+        : "UPDATE rentals SET status = 'active', closed_at = NULL WHERE id = ?",
+      wasClosed ? [changedAt, rentalId] : [rentalId],
+    );
+  });
+
+  return {
+    rentalId,
+    changedAt,
+    returnedRows,
+    addedRows,
+    remainingRows,
+    wasClosed,
+    receipt: {
+      kind: additions.length ? 'edit' : wasClosed ? 'final' : 'partial',
+      type: additions.length ? 'edit' : wasClosed ? 'final' : 'partial',
+      returnedItemIds: returnedRows.map((item) => item.id),
+      addedItemIds: addedRows.map((item) => item.id),
+      remainingItemIds: remainingRows.map((item) => item.id),
+    },
+  };
+}
+
 /**
  * Splits every selected open item in a single transaction.
  *

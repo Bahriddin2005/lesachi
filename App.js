@@ -24,13 +24,13 @@ import {
 import {
   createEquipmentType,
   createRental,
+  editRental,
   deleteEquipmentType,
   fetchEquipmentTypes,
   fetchRentals,
   getSetting,
   logSentMessage,
   migrateDatabase,
-  registerReturn,
   setSetting,
   updateEquipmentType,
   usesRemoteDatabase,
@@ -101,7 +101,7 @@ function LesaApp({ db }) {
   const [refreshing, setRefreshing] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [selected, setSelected] = useState(null);
-  const [returnTarget, setReturnTarget] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [equipmentEditor, setEquipmentEditor] = useState(null);
   const [equipmentDeleteTarget, setEquipmentDeleteTarget] = useState(null);
@@ -182,16 +182,16 @@ function LesaApp({ db }) {
     }
   };
 
-  const submitReturn = async (returns) => {
+  const submitEdit = async (changes) => {
     try {
-      const outcome = await registerReturn(db, returnTarget.id, returns);
+      const outcome = await editRental(db, editTarget.id, changes);
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === returnTarget.id);
-      setReturnTarget(null);
+      const updated = rows.find((row) => row.id === editTarget.id);
+      setEditTarget(null);
       setSelected(null);
       if (updated) setTimeout(() => setReceipt({ rental: updated, context: outcome.receipt }), 350);
     } catch (error) {
-      Alert.alert('Qaytarish saqlanmadi', error.message || 'Qaytarishni saqlashda xatolik yuz berdi.');
+      Alert.alert('O‘zgarishlar saqlanmadi', error.message || 'O‘zgarishlarni saqlashda xatolik yuz berdi.');
     }
   };
 
@@ -328,10 +328,10 @@ function LesaApp({ db }) {
       <RentalDetail
         rental={selected}
         onClose={() => setSelected(null)}
-        onReturn={() => setReturnTarget(selected)}
+        onEdit={() => setEditTarget(selected)}
         onReceipt={(rental) => { setSelected(null); setReceipt({ rental, context: { type: isClosed(rental) ? 'final' : 'current' } }); }}
       />
-      <ReturnModal target={returnTarget} onClose={() => setReturnTarget(null)} onSubmit={submitReturn} />
+      <RentalEditModal target={editTarget} equipment={equipment} onClose={() => setEditTarget(null)} onSubmit={submitEdit} />
       <EquipmentModal editor={equipmentEditor} onClose={() => setEquipmentEditor(null)} onSubmit={saveEquipment} />
       <EquipmentDeleteModal item={equipmentDeleteTarget} error={equipmentDeleteError} onClose={() => { setEquipmentDeleteTarget(null); setEquipmentDeleteError(''); }} onConfirm={confirmDeleteEquipment} />
       <InstallAppModal open={installHelpOpen} installed={appInstalled} onClose={() => setInstallHelpOpen(false)} />
@@ -709,7 +709,7 @@ function NewRentalModal({ open, equipment, onClose, onSubmit }) {
   );
 }
 
-function RentalDetail({ rental, onClose, onReturn, onReceipt }) {
+function RentalDetail({ rental, onClose, onEdit, onReceipt }) {
   const activeItems = rental ? openItems(rental) : [];
   const paidItems = rental ? returnedItems(rental) : [];
   const activeQuantity = quantityOf(activeItems);
@@ -727,7 +727,6 @@ function RentalDetail({ rental, onClose, onReturn, onReceipt }) {
       {activeItems.map((item) => <View key={item.id} style={s.detailItem}>
         <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>{item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>Olingan: {formatDate(item.startedAt || rental.startedAt, true)} · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={[s.detailItemTotal, { color: C.redDark }]}>{formatMoney(itemTotal(rental, item))}</Text></View>
       </View>)}
-      <Pressable style={s.returnButton} onPress={onReturn}><Text style={s.returnButtonText}>Qaytardi</Text></Pressable>
     </>}
 
     {paidItems.length > 0 && <>
@@ -738,41 +737,62 @@ function RentalDetail({ rental, onClose, onReturn, onReceipt }) {
       </View>)}
     </>}
 
+    <Pressable style={s.returnButton} onPress={onEdit}><Text style={s.returnButtonText}>Tahrirlash</Text></Pressable>
     <Pressable style={s.receiptButton} onPress={() => onReceipt(rental)}><Text style={s.receiptButtonText}>▧  {isClosed(rental) ? 'Yakuniy chekni ko‘rish' : 'Elektron chekni ko‘rish'}</Text></Pressable>
   </ScrollView></SafeAreaView>}</Modal>;
 }
 
-function ReturnModal({ target, onClose, onSubmit }) {
+function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   const activeItems = target ? openItems(target) : [];
-  const [quantities, setQuantities] = useState({});
+  const [returnQuantities, setReturnQuantities] = useState({});
+  const [addQuantities, setAddQuantities] = useState({});
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (target) {
-      setQuantities(Object.fromEntries(openItems(target).map((item) => [item.id, '0'])));
+      setReturnQuantities(Object.fromEntries(openItems(target).map((item) => [item.id, '0'])));
+      setAddQuantities(Object.fromEntries((equipment || []).map((item) => [item.id, '0'])));
       setSaving(false);
     }
-  }, [target?.id]);
+  }, [target?.id, equipment]);
 
-  const updateQuantity = (itemId, value) => setQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+  const updateReturnQuantity = (itemId, value) => setReturnQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+  const updateAddQuantity = (itemId, value) => setAddQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
   const submit = async () => {
-    const invalid = activeItems.find((item) => Number(quantities[item.id] || 0) > Number(item.quantity));
-    if (invalid) return Alert.alert('Son noto‘g‘ri', `${invalid.name} uchun 0 dan ${invalid.quantity} tagacha son kiriting.`);
-    const returns = activeItems.map((item) => ({ itemId: item.id, quantity: Number(quantities[item.id] || 0) })).filter((entry) => entry.quantity > 0);
-    if (!returns.length) return Alert.alert('Qaytarilgan anjom tanlanmadi', 'Kamida bitta anjom uchun qaytarilgan sonini kiriting.');
+    const invalidReturn = activeItems.find((item) => Number(returnQuantities[item.id] || 0) > Number(item.quantity));
+    if (invalidReturn) return Alert.alert('Son noto‘g‘ri', `${invalidReturn.name} uchun 0 dan ${invalidReturn.quantity} tagacha son kiriting.`);
+    const invalidAdd = (equipment || []).find((item) => Number(addQuantities[item.id] || 0) > Number(item.availableQuantity || 0));
+    if (invalidAdd) return Alert.alert('Omborda yetarli emas', `${invalidAdd.name} uchun omborda faqat ${invalidAdd.availableQuantity} dona mavjud.`);
+    const returns = activeItems.map((item) => ({ itemId: item.id, quantity: Number(returnQuantities[item.id] || 0) })).filter((entry) => entry.quantity > 0);
+    const additions = (equipment || []).map((item) => ({
+      equipmentTypeId: item.id,
+      name: item.name,
+      dailyPrice: item.dailyPrice,
+      quantity: Number(addQuantities[item.id] || 0),
+    })).filter((entry) => entry.quantity > 0);
+    if (!returns.length && !additions.length) return Alert.alert('O‘zgarish kiritilmadi', 'Hech qanday o‘zgarish kiritilmadi.');
     setSaving(true);
-    try { await onSubmit(returns); } finally { setSaving(false); }
+    try { await onSubmit({ returns, additions }); } finally { setSaving(false); }
   };
 
   return <Modal visible={Boolean(target)} transparent animationType="fade" onRequestClose={onClose}><View style={s.overlay}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.returnSheet}>{target && <>
-    <ModalHeader title="Qisman qaytarish" subtitle={target.customerName} onClose={onClose} />
-    <Text style={s.returnHint}>Har bir anjom uchun mijoz qaytargan sonni kiriting. 0 qoldirilgan anjom mijozda qoladi va kunlik hisob davom etadi.</Text>
+    <ModalHeader title="Tahrirlash" subtitle={target.customerName} onClose={onClose} />
     <ScrollView style={s.returnItemsScroll} contentContainerStyle={s.returnItemsList} keyboardShouldPersistTaps="handled">
-      {activeItems.map((item) => <View key={item.id} style={s.returnItemCard}>
-        <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Mijozda hozir: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.quantity}</Text></View>
-        <Field label="NECHTA QAYTARDI?"><TextInput style={s.input} value={quantities[item.id] ?? '0'} onChangeText={(value) => updateQuantity(item.id, value)} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+      {activeItems.length > 0 && <>
+        <Text style={s.itemsTitle}>Qaytarilgan anjomlar</Text>
+        <Text style={s.returnHint}>Qaytgan miqdorni kiriting. Qolgan anjomlar mijozda qoladi va hisob davom etadi.</Text>
+        {activeItems.map((item) => <View key={item.id} style={s.returnItemCard}>
+          <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Mijozda hozir: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.quantity}</Text></View>
+          <Field label="NECHTA QAYTARDI?"><TextInput style={s.input} value={returnQuantities[item.id] ?? '0'} onChangeText={(value) => updateReturnQuantity(item.id, value)} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+        </View>)}
+      </>}
+      <Text style={[s.itemsTitle, { marginTop: 14 }]}>Yana anjom olib ketdimi?</Text>
+      <Text style={s.returnHint}>Omborda mavjud anjomdan qo‘shimcha berilgan miqdorni kiriting. Bu anjom uchun hisob bugundan boshlanadi.</Text>
+      {(equipment || []).map((item) => <View key={item.id} style={s.returnItemCard}>
+        <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Omborda mavjud: {item.availableQuantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.availableQuantity}</Text></View>
+        <Field label="QO‘SHILADIGAN SON"><TextInput style={s.input} value={addQuantities[item.id] ?? '0'} onChangeText={(value) => updateAddQuantity(item.id, value)} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
       </View>)}
     </ScrollView>
-    <Pressable disabled={saving} style={[s.mainButton, saving && { opacity: .65 }]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>Tasdiqlash</Text>}</Pressable>
+    <Pressable disabled={saving} style={[s.mainButton, saving && { opacity: .65 }]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>Saqlash</Text>}</Pressable>
   </>}</KeyboardAvoidingView></View></Modal>;
 }
 
@@ -783,20 +803,22 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
   const breakdown = rental ? receiptBreakdown(rental, context) : null;
   const type = context.type || 'current';
   const isPartial = type === 'partial';
+  const isEdit = type === 'edit';
   const isFinal = type === 'final' || breakdown?.isFinal;
   const returned = breakdown?.returnedItems || [];
+  const added = breakdown?.addedItems || [];
   const remaining = breakdown?.openItems || [];
   const returnedTotal = breakdown?.returnedTotal ?? 0;
   const current = breakdown?.currentDebt ?? 0;
   const final = breakdown?.finalTotal ?? rentalTotal(rental || { items: [] });
-  const title = isPartial ? 'Qisman qaytarish cheki' : isFinal ? 'Yakuniy chek' : type === 'new' ? 'Yangi ijara cheki' : 'Joriy elektron chek';
-  useEffect(() => setBusy(null), [rental?.id, type, context.returnedItemIds?.join(',')]);
+  const title = isEdit ? 'Ijara o‘zgarishi cheki' : isPartial ? 'Qisman qaytarish cheki' : isFinal ? 'Yakuniy chek' : type === 'new' ? 'Yangi ijara cheki' : 'Joriy elektron chek';
+  useEffect(() => setBusy(null), [rental?.id, type, context.returnedItemIds?.join(','), context.addedItemIds?.join(',')]);
   const run = async (name, action) => {
     setBusy(name);
     try { await action(receipt); } finally { setBusy(null); }
   };
   return <Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
-    <ModalHeader title={title} subtitle={isPartial ? 'Qaytarilgan qism bo‘yicha to‘lov' : isFinal ? 'Barcha anjomlar qaytarilgan' : 'Hisob real vaqtda yangilanadi'} onClose={onClose} />
+    <ModalHeader title={title} subtitle={isEdit ? 'Qaytarish va qo‘shimcha anjomlar' : isPartial ? 'Qaytarilgan qism bo‘yicha to‘lov' : isFinal ? 'Barcha anjomlar qaytarilgan' : 'Hisob real vaqtda yangilanadi'} onClose={onClose} />
     <View style={s.receiptPaper}>
       <View style={s.receiptHead}><Brand /><Text style={s.receiptNumber}>#{rental.id.slice(-8).toUpperCase()}</Text></View>
       <View style={s.receiptCustomer}><Text style={s.receiptName}>{rental.customerName}</Text><Text style={s.phone}>{rental.phone}</Text><Text style={s.receiptDate}>{formatDate(new Date(), true)}</Text></View>
@@ -806,6 +828,11 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
         {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>✓ {item.name} × {item.quantity}</Text><Text style={s.receiptItemSub}>{dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · {formatMoney(item.dailyPrice)}/kun · TO‘LANDI</Text></View><Text style={[s.receiptPaidAmount, { color: C.successDark }]}>{formatMoney(lineAmount(rental, item))}</Text></View>)}
       </>}
 
+      {isEdit && added.length > 0 && <>
+        <Text style={s.receiptSectionTitle}>QO‘SHIMCHA OLINGAN ANJOMLAR</Text>
+        {added.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>＋ {item.name} × {item.quantity}</Text><Text style={s.receiptItemSub}>Bugun olindi · {formatMoney(item.dailyPrice)}/kun · JORIY QARZ</Text></View><Text style={[s.receiptOpenAmount, { color: C.redDark }]}>{formatMoney(lineAmount(rental, item))}</Text></View>)}
+      </>}
+
       {!isFinal && remaining.length > 0 && <View style={[s.receiptCurrentBlock, { backgroundColor: C.redSoft, borderColor: C.redLine }]}>
         <Text style={[s.receiptCurrentTitle, { color: C.redDark }]}>JORIY QARZ — O‘SISHDA DAVOM ETMOQDA</Text>
         {remaining.map((item) => <View key={item.id} style={s.receiptOpenRow}><Text style={s.receiptItemName}>{item.name} × {item.quantity}</Text><Text style={[s.receiptOpenAmount, { color: C.redDark }]}>{formatMoney(lineAmount(rental, item))}</Text></View>)}
@@ -813,7 +840,7 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
         {isPartial && <Text style={s.receiptReminder}>Qolgan {quantityOf(remaining)} dona anjom qaytarilmaguncha, kunlik hisob davom etadi.</Text>}
       </View>}
 
-      {isPartial && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>CHEK BO‘YICHA TO‘LANDI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(returnedTotal)}</Text></View>}
+      {(isPartial || isEdit) && returned.length > 0 && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>QAYTARILGAN QISM TO‘LANDI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(returnedTotal)}</Text></View>}
       {isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>YAKUNIY JAMI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(final)}</Text></View>}
       {!isPartial && !isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>JORIY QARZ</Text><Text style={[s.receiptGrandValue, { color: C.redDark }]}>{formatMoney(current)}</Text></View>}
     </View>

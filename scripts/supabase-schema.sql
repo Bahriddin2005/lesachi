@@ -221,6 +221,153 @@ $$;
 grant execute on function public.register_rental_return(text, jsonb, timestamptz)
   to anon, authenticated;
 
+-- Unified customer edit: return existing items and add newly borrowed items
+-- in one database transaction. The return RPC above performs the row split;
+-- additions are validated against current stock after those returned pieces
+-- have been released.
+create or replace function public.edit_rental_with_changes(
+  p_rental_id text,
+  p_returns jsonb default '[]'::jsonb,
+  p_items jsonb default '[]'::jsonb,
+  p_changed_at timestamptz default now()
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  return_result jsonb := jsonb_build_object(
+    'returnedRows', '[]'::jsonb,
+    'remainingRows', '[]'::jsonb,
+    'wasClosed', false,
+    'returnedAt', p_changed_at
+  );
+  item jsonb;
+  equipment_row public.equipment_types%rowtype;
+  rented_quantity integer;
+  available_quantity integer;
+  item_id text;
+  added_rows jsonb := '[]'::jsonb;
+  remaining_rows jsonb := '[]'::jsonb;
+  has_open_items boolean;
+begin
+  if not exists (select 1 from public.rentals where id = p_rental_id) then
+    raise exception 'Ijara topilmadi.';
+  end if;
+  if jsonb_typeof(coalesce(p_returns, '[]'::jsonb)) <> 'array'
+     or jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array' then
+    raise exception 'O‘zgarishlar formati noto‘g‘ri.';
+  end if;
+  if jsonb_array_length(coalesce(p_returns, '[]'::jsonb)) = 0
+     and jsonb_array_length(coalesce(p_items, '[]'::jsonb)) = 0 then
+    raise exception 'Hech qanday o‘zgarish kiritilmadi.';
+  end if;
+
+  -- This call locks and splits every returned row. Since it is inside this
+  -- function, additions below commit or roll back with the returns.
+  if jsonb_array_length(coalesce(p_returns, '[]'::jsonb)) > 0 then
+    return_result := public.register_rental_return(p_rental_id, p_returns, p_changed_at);
+  end if;
+
+  for item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) loop
+    if nullif(trim(item->>'equipmentTypeId'), '') is null then
+      raise exception 'Qo‘shiladigan anjom turini tanlang.';
+    end if;
+    if (item->>'quantity') is null or (item->>'quantity')::integer <= 0 then
+      raise exception 'Qo‘shiladigan anjom sonini to‘g‘ri kiriting.';
+    end if;
+
+    select * into equipment_row
+    from public.equipment_types
+    where id = item->>'equipmentTypeId'
+    for update;
+    if not found then
+      raise exception 'Qo‘shiladigan anjom omborda topilmadi.';
+    end if;
+
+    select coalesce(sum(ri.quantity), 0)::integer into rented_quantity
+    from public.rental_items ri
+    join public.rentals r on r.id = ri.rental_id
+    where ri.equipment_type_id = equipment_row.id
+      and ri.status = 'open'
+      and ri.quantity > 0
+      and r.status <> 'closed';
+    available_quantity := equipment_row.total_quantity - rented_quantity;
+    if (item->>'quantity')::integer > greatest(0, available_quantity) then
+      raise exception '%: omborda faqat % dona mavjud.', equipment_row.name, greatest(0, available_quantity);
+    end if;
+
+    item_id := coalesce(nullif(trim(item->>'id'), ''), 'item_' || substr(md5(random()::text || clock_timestamp()::text), 1, 24));
+    insert into public.rental_items (
+      id, rental_id, equipment_type_id, name, quantity, daily_price,
+      started_at, status, returned_at, frozen_amount
+    ) values (
+      item_id,
+      p_rental_id,
+      equipment_row.id,
+      equipment_row.name,
+      (item->>'quantity')::integer,
+      equipment_row.daily_price,
+      p_changed_at,
+      'open',
+      null,
+      null
+    );
+
+    added_rows := added_rows || jsonb_build_array(jsonb_build_object(
+      'id', item_id,
+      'rentalId', p_rental_id,
+      'equipmentTypeId', equipment_row.id,
+      'name', equipment_row.name,
+      'quantity', (item->>'quantity')::integer,
+      'dailyPrice', equipment_row.daily_price,
+      'startedAt', p_changed_at,
+      'status', 'open',
+      'returnedAt', null,
+      'frozenAmount', null
+    ));
+  end loop;
+
+  select exists(
+    select 1 from public.rental_items
+    where rental_id = p_rental_id and status = 'open' and quantity > 0
+  ) into has_open_items;
+  update public.rentals
+  set status = case when has_open_items then 'active' else 'closed' end,
+      closed_at = case when has_open_items then null else p_changed_at end
+  where id = p_rental_id;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id', ri.id,
+    'rentalId', ri.rental_id,
+    'equipmentTypeId', ri.equipment_type_id,
+    'name', ri.name,
+    'quantity', ri.quantity,
+    'dailyPrice', ri.daily_price,
+    'startedAt', ri.started_at,
+    'status', ri.status,
+    'returnedAt', ri.returned_at,
+    'frozenAmount', ri.frozen_amount
+  ) order by ri.id), '[]'::jsonb)
+  into remaining_rows
+  from public.rental_items ri
+  where ri.rental_id = p_rental_id and ri.status = 'open' and ri.quantity > 0;
+
+  return jsonb_build_object(
+    'rentalId', p_rental_id,
+    'changedAt', p_changed_at,
+    'returnedAt', return_result->'returnedAt',
+    'returnedRows', coalesce(return_result->'returnedRows', '[]'::jsonb),
+    'addedRows', added_rows,
+    'remainingRows', remaining_rows,
+    'wasClosed', not has_open_items
+  );
+end;
+$$;
+
+grant execute on function public.edit_rental_with_changes(text, jsonb, jsonb, timestamptz)
+  to anon, authenticated;
+
 create or replace function public.create_rental_with_items(
   p_rental_id text,
   p_customer_id text,

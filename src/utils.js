@@ -160,7 +160,7 @@ export function initials(name = '') {
 }
 
 function receiptType(value) {
-  return ['new', 'current', 'partial', 'final'].includes(value) ? value : null;
+  return ['new', 'current', 'partial', 'edit', 'final'].includes(value) ? value : null;
 }
 
 /**
@@ -180,7 +180,12 @@ export function resolveReceipt(rentalOrReceipt, receiptContext = {}) {
     .map((id) => (typeof id === 'object' && id ? id.id : id))
     .filter((id) => id !== undefined && id !== null)
     .map((id) => String(id));
-  return { rental, type: requestedType, returnedItemIds };
+  const addedIds = context.addedItemIds ?? envelope.addedItemIds ?? [];
+  const addedItemIds = (Array.isArray(addedIds) ? addedIds : [addedIds])
+    .map((id) => (typeof id === 'object' && id ? id.id : id))
+    .filter((id) => id !== undefined && id !== null)
+    .map((id) => String(id));
+  return { rental, type: requestedType, returnedItemIds, addedItemIds };
 }
 
 function returnedLine(rental, item, overrides = {}) {
@@ -265,6 +270,13 @@ function selectedReturnedLines(lines, ids) {
   return lines.filter((item) => selected.has(String(item.sourceItemId)));
 }
 
+function selectedOpenLines(lines, ids) {
+  if (!ids.length) return lines;
+  const selected = new Set(ids);
+  const exact = lines.filter((item) => selected.has(String(item.id)));
+  return exact.length ? exact : lines.filter((item) => selected.has(String(item.sourceItemId)));
+}
+
 /**
  * Gives native UI, HTML/PDF and SMS the same split-aware accounting view.
  * For a partial receipt, `returnedItems` and `returnedTotal` are only the
@@ -276,11 +288,18 @@ export function receiptBreakdown(rentalOrReceipt, receiptContext = {}) {
   const openItems = openItemLines(context.rental);
   const inferredFinal = context.type !== 'new' && (context.type === 'final' || isClosed(context.rental));
   const type = inferredFinal ? 'final' : context.type;
-  const returnedItems = type === 'partial'
+  const returnedItems = type === 'partial' || type === 'edit'
     ? selectedReturnedLines(allReturnedItems, context.returnedItemIds)
     : type === 'new'
       ? []
       : allReturnedItems;
+  const addedItems = type === 'edit' || type === 'new'
+    ? selectedOpenLines(openItems, context.addedItemIds)
+    : [];
+  const addedIds = new Set(addedItems.map((item) => String(item.id)));
+  const otherOpenItems = type === 'edit'
+    ? openItems.filter((item) => !addedIds.has(String(item.id)))
+    : openItems;
   const returnedTotal = sumLines(returnedItems);
   const currentDebt = sumLines(openItems);
   const paid = sumLines(allReturnedItems);
@@ -289,6 +308,8 @@ export function receiptBreakdown(rentalOrReceipt, receiptContext = {}) {
     type,
     isFinal: type === 'final',
     returnedItems,
+    addedItems,
+    otherOpenItems,
     openItems,
     returnedTotal,
     currentDebt,
@@ -302,6 +323,7 @@ export function receiptBreakdown(rentalOrReceipt, receiptContext = {}) {
 function receiptHeading(type) {
   if (type === 'new') return 'YANGI IJARA CHEKI';
   if (type === 'partial') return 'QISMAN QAYTARISH CHEKI';
+  if (type === 'edit') return 'IJARA O‘ZGARISHI CHEKI';
   if (type === 'final') return 'YAKUNIY CHEK';
   return 'JORIY HOLAT CHEKI';
 }
@@ -321,7 +343,7 @@ function openDescription(openItems) {
 
 export function receiptText(rentalOrReceipt, receiptContext = {}) {
   const breakdown = receiptBreakdown(rentalOrReceipt, receiptContext);
-  const { rental, type, returnedItems, openItems, returnedTotal, currentDebt, finalTotal, remainingQuantity } = breakdown;
+  const { rental, type, returnedItems, addedItems, openItems, otherOpenItems, returnedTotal, currentDebt, finalTotal, remainingQuantity } = breakdown;
   const lines = [
     `LESA — ${receiptHeading(type)}`,
     `Mijoz: ${rental.customerName || '—'}`,
@@ -334,6 +356,21 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
     lines.push('QAYTARILGAN ANJOMLAR — TO‘LANDI');
     lines.push(...returnedItems.map((item) => lineText(item, 'returned')));
     lines.push('', `YAKUNIY TO‘LIQ SUMMA: ${formatMoney(finalTotal)}`);
+  } else if (type === 'edit') {
+    if (returnedItems.length) {
+      lines.push('QAYTARILGAN ANJOMLAR — TO‘LANDI');
+      lines.push(...returnedItems.map((item) => lineText(item, 'returned')));
+      lines.push('', `QABUL QILINGAN TO‘LOV: ${formatMoney(returnedTotal)}`);
+    }
+    if (addedItems.length) {
+      lines.push('', 'QO‘SHIMCHA OLINGAN ANJOMLAR — JORIY QARZ');
+      lines.push(...addedItems.map((item) => lineText(item, 'open')));
+    }
+    if (otherOpenItems.length) {
+      lines.push('', 'HALI MIJOZDA — JORIY QARZ');
+      lines.push(...otherOpenItems.map((item) => lineText(item, 'open')));
+      lines.push(`JORIY QARZ: ${formatMoney(currentDebt)}`);
+    }
   } else if (type === 'partial') {
     lines.push('QAYTARILGAN QISM — TO‘LANDI');
     lines.push(...(returnedItems.length ? returnedItems.map((item) => lineText(item, 'returned')) : ['Qaytarilgan anjom topilmadi.']));
@@ -368,7 +405,16 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
 /** A concise customer-facing message; the detailed receipt text remains for PDF/share. */
 export function receiptSmsText(rentalOrReceipt, receiptContext = {}) {
   const breakdown = receiptBreakdown(rentalOrReceipt, receiptContext);
-  const { type, returnedItems, openItems, returnedTotal, currentDebt, finalTotal } = breakdown;
+  const { type, returnedItems, addedItems, openItems, returnedTotal, currentDebt, finalTotal } = breakdown;
+  if (type === 'edit') {
+    const returned = returnedItems.length
+      ? ` Qaytarildi: ${returnedItems.map((item) => `${item.quantity} dona ${item.name}`).join(', ')} (${formatMoney(returnedTotal)}).`
+      : '';
+    const added = addedItems.length
+      ? ` Qo‘shimcha olindi: ${addedItems.map((item) => `${item.quantity} dona ${item.name}`).join(', ')}.`
+      : '';
+    return `Lesachi:${returned}${added} Sizda jami ${openDescription(openItems)} bor, joriy qarzingiz ${formatMoney(currentDebt)}.`.trim();
+  }
   if (type === 'partial') {
     const accepted = returnedItems.length
       ? returnedItems.map((item) => `${item.quantity} dona ${item.name} qabul qilindi, ${formatMoney(item.amount)}`).join('; ')
@@ -432,13 +478,19 @@ function summaryHtml(label, amount, kind = 'paid', detail = '') {
 
 export function receiptHtml(rentalOrReceipt, receiptContext = {}) {
   const breakdown = receiptBreakdown(rentalOrReceipt, receiptContext);
-  const { rental, type, returnedItems, openItems, returnedTotal, currentDebt, finalTotal, remainingQuantity } = breakdown;
+  const { rental, type, returnedItems, addedItems, openItems, otherOpenItems, returnedTotal, currentDebt, finalTotal, remainingQuantity } = breakdown;
   const id = String(rental.id || 'CHEK').slice(-8).toUpperCase();
   let body = '';
 
   if (type === 'final') {
     body = `${sectionHtml('Qaytarilgan anjomlar — TO‘LANDI', returnedItems, 'returned')}
       ${summaryHtml('YAKUNIY TO‘LIQ SUMMA', finalTotal, 'paid')}`;
+  } else if (type === 'edit') {
+    body = `${returnedItems.length ? `${sectionHtml('Qaytarilgan anjomlar — TO‘LANDI', returnedItems, 'returned')}
+      ${summaryHtml('QABUL QILINGAN TO‘LOV', returnedTotal, 'paid')}` : ''}
+      ${addedItems.length ? sectionHtml('Qo‘shimcha olingan anjomlar — JORIY QARZ', addedItems, 'open') : ''}
+      ${otherOpenItems.length ? `${sectionHtml('Hali mijozda — JORIY QARZ', otherOpenItems, 'open')}
+      ${summaryHtml('JORIY QARZ', currentDebt, 'current', 'Bu summa o‘sishda davom etadi.')}` : ''}`;
   } else if (type === 'partial') {
     body = `${sectionHtml('Qaytarilgan qism — TO‘LANDI', returnedItems, 'returned')}
       ${summaryHtml('QABUL QILINGAN TO‘LOV', returnedTotal, 'paid')}

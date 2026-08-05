@@ -18,6 +18,11 @@ export function createEquipmentType(db, payload) { return implementation('create
 export function updateEquipmentType(db, id, payload) { return implementation('updateEquipmentType', db)(usesRemoteDatabase ? id : db, usesRemoteDatabase ? payload : id, usesRemoteDatabase ? undefined : payload); }
 export function deleteEquipmentType(db, id) { return implementation('deleteEquipmentType', db)(usesRemoteDatabase ? id : db, usesRemoteDatabase ? undefined : id); }
 export function createRental(db, payload) { return implementation('createRental', db)(usesRemoteDatabase ? payload : db, usesRemoteDatabase ? undefined : payload); }
+export function editRental(db, rentalId, changes) {
+  return usesRemoteDatabase
+    ? remote.editRental(rentalId, changes)
+    : local.editRental(db, rentalId, changes);
+}
 export function registerReturn(db, rentalId, returns, legacyQuantity) {
   return usesRemoteDatabase
     ? remote.registerReturn(rentalId, returns, legacyQuantity)

@@ -117,6 +117,31 @@ function normaliseReturnRequests(returnsOrItemId, legacyQuantity) {
   return requests;
 }
 
+function normaliseAddedItems(additions) {
+  const source = Array.isArray(additions) ? additions : [];
+  const byType = new Map();
+  for (const entry of source) {
+    const equipmentTypeId = String(entry?.equipmentTypeId || '').trim();
+    if (!equipmentTypeId) throw new Error('Yangi anjom turini tanlang.');
+    const quantity = Number(entry?.quantity);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      throw new Error('Qo‘shiladigan anjom sonini to‘g‘ri kiriting.');
+    }
+    const dailyPrice = Number(entry?.dailyPrice);
+    if (!Number.isSafeInteger(dailyPrice) || dailyPrice < 0) {
+      throw new Error('Anjomning kunlik narxi noto‘g‘ri.');
+    }
+    const previous = byType.get(equipmentTypeId);
+    byType.set(equipmentTypeId, {
+      equipmentTypeId,
+      name: String(entry?.name || '').trim(),
+      quantity: (previous?.quantity || 0) + quantity,
+      dailyPrice,
+    });
+  }
+  return Array.from(byType.values());
+}
+
 export async function fetchRentals() {
   const db = requireClient();
   const [rentals, customers, items] = await Promise.all([
@@ -241,6 +266,50 @@ export async function createRental(payload) {
     p_started_at: now,
   }));
   return rentalId;
+}
+
+export async function editRental(rentalId, changes = {}) {
+  const rawReturns = Array.isArray(changes.returns) ? changes.returns : [];
+  const returns = rawReturns.filter((entry) => Number(entry?.quantity || 0) > 0);
+  const additions = normaliseAddedItems(changes.additions);
+  if (!returns.length && !additions.length) {
+    throw new Error('Hech qanday o‘zgarish kiritilmadi.');
+  }
+  const itemPayload = additions.map((item) => ({
+    id: createId('item'),
+    equipmentTypeId: item.equipmentTypeId,
+    name: item.name,
+    quantity: item.quantity,
+    dailyPrice: item.dailyPrice,
+  }));
+  const changedAt = new Date().toISOString();
+  const data = await unwrap(requireClient().rpc('edit_rental_with_changes', {
+    p_rental_id: rentalId,
+    p_returns: returns,
+    p_items: itemPayload,
+    p_changed_at: changedAt,
+  }));
+  const outcome = data || {};
+  const returnedRows = (outcome.returnedRows || []).map(toReturnedRpcItem);
+  const addedRows = (outcome.addedRows || []).map(toReturnedRpcItem);
+  const remainingRows = (outcome.remainingRows || []).map(toReturnedRpcItem);
+  const wasClosed = Boolean(outcome.wasClosed);
+  const type = addedRows.length ? 'edit' : wasClosed ? 'final' : 'partial';
+  return {
+    rentalId,
+    changedAt: outcome.changedAt || changedAt,
+    returnedRows,
+    addedRows,
+    remainingRows,
+    wasClosed,
+    receipt: {
+      kind: type,
+      type,
+      returnedItemIds: returnedRows.map((item) => item.id),
+      addedItemIds: addedRows.map((item) => item.id),
+      remainingItemIds: remainingRows.map((item) => item.id),
+    },
+  };
 }
 
 export async function registerReturn(rentalId, returnsOrItemId, legacyQuantity) {
