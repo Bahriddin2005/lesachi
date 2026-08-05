@@ -235,10 +235,12 @@ function LesaApp({ db }) {
   };
 
   const submitEdit = async (changes) => {
+    const rentalId = editTarget?.id;
+    if (!rentalId) throw new Error('Tahrirlanadigan ijara topilmadi. Oynani yopib, qayta oching.');
     try {
-      const outcome = await editRental(db, editTarget.id, changes);
+      const outcome = await editRental(db, rentalId, changes);
       const rows = await load(true);
-      const updated = rows.find((row) => row.id === editTarget.id);
+      const updated = rows.find((row) => row.id === rentalId);
       setEditTarget(null);
       setSelected(null);
       if (updated) {
@@ -259,8 +261,10 @@ function LesaApp({ db }) {
         }
         setTimeout(() => setReceipt({ rental: updated, context: outcome.receipt }), 350);
       }
+      return outcome;
     } catch (error) {
       Alert.alert('O‘zgarishlar saqlanmadi', error.message || 'O‘zgarishlarni saqlashda xatolik yuz berdi.');
+      throw error;
     }
   };
 
@@ -1010,19 +1014,31 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   const [returnQuantities, setReturnQuantities] = useState({});
   const [addQuantities, setAddQuantities] = useState({});
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   useEffect(() => {
     if (target) {
       setReturnQuantities(Object.fromEntries(openItems(target).map((item) => [item.id, '0'])));
       setAddQuantities(Object.fromEntries((equipment || []).map((item) => [item.id, '0'])));
       setSaving(false);
+      setSaveError('');
     }
-  }, [target?.id, equipment]);
+  }, [target?.id]);
 
-  const updateReturnQuantity = (itemId, value) => setReturnQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
-  const updateAddQuantity = (itemId, value) => setAddQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+  const updateReturnQuantity = (itemId, value) => {
+    setSaveError('');
+    setReturnQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+  };
+  const updateAddQuantity = (itemId, value) => {
+    setSaveError('');
+    setAddQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+  };
   const submit = async () => {
+    setSaveError('');
     const invalidReturn = activeItems.find((item) => Number(returnQuantities[item.id] || 0) > Number(item.quantity));
-    if (invalidReturn) return Alert.alert('Son noto‘g‘ri', `${invalidReturn.name} uchun 0 dan ${invalidReturn.quantity} tagacha son kiriting.`);
+    if (invalidReturn) {
+      setSaveError(`${invalidReturn.name} uchun 0 dan ${invalidReturn.quantity} tagacha son kiriting.`);
+      return;
+    }
     const returns = activeItems.map((item) => ({ itemId: item.id, quantity: Number(returnQuantities[item.id] || 0) })).filter((entry) => entry.quantity > 0);
     const releasedByType = activeItems.reduce((map, item) => {
       const returned = Number(returnQuantities[item.id] || 0);
@@ -1030,7 +1046,10 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
       return map;
     }, {});
     const invalidAdd = (equipment || []).find((item) => Number(addQuantities[item.id] || 0) > Number(item.availableQuantity || 0) + Number(releasedByType[item.id] || 0));
-    if (invalidAdd) return Alert.alert('Omborda yetarli emas', `${invalidAdd.name} uchun omborda faqat ${Number(invalidAdd.availableQuantity || 0) + Number(releasedByType[invalidAdd.id] || 0)} dona mavjud.`);
+    if (invalidAdd) {
+      setSaveError(`${invalidAdd.name} uchun omborda faqat ${Number(invalidAdd.availableQuantity || 0) + Number(releasedByType[invalidAdd.id] || 0)} dona mavjud.`);
+      return;
+    }
     const additions = (equipment || []).map((item) => ({
       equipmentTypeId: item.id,
       name: item.name,
@@ -1042,27 +1061,34 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
       return;
     }
     setSaving(true);
-    try { await onSubmit({ returns, additions }); } finally { setSaving(false); }
+    try {
+      await onSubmit({ returns, additions });
+    } catch (error) {
+      setSaveError(error.message || 'O‘zgarishlarni saqlab bo‘lmadi. Qayta urinib ko‘ring.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return <Modal visible={Boolean(target)} transparent animationType="fade" onRequestClose={onClose}><View style={s.overlay}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.returnSheet}>{target && <>
     <ModalHeader title="Tahrirlash" subtitle={target.customerName} onClose={onClose} />
-    <ScrollView style={s.returnItemsScroll} contentContainerStyle={s.returnItemsList} keyboardShouldPersistTaps="handled">
+    <ScrollView style={s.returnItemsScroll} contentContainerStyle={s.returnItemsList} keyboardShouldPersistTaps="always">
       {activeItems.length > 0 && <>
         <Text style={s.itemsTitle}>Qaytarilgan anjomlar</Text>
         <Text style={s.returnHint}>Qaytgan miqdorni kiriting. Qolgan anjomlar mijozda qoladi va hisob davom etadi.</Text>
         {activeItems.map((item) => <View key={item.id} style={s.returnItemCard}>
           <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Mijozda hozir: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.quantity}</Text></View>
-          <Field label="NECHTA QAYTARDI?"><TextInput style={s.input} value={returnQuantities[item.id] ?? '0'} onChangeText={(value) => updateReturnQuantity(item.id, value)} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+          <Field label="NECHTA QAYTARDI?"><TextInput style={s.input} value={returnQuantities[item.id] ?? '0'} onChangeText={(value) => updateReturnQuantity(item.id, value)} keyboardType="number-pad" selectTextOnFocus placeholder="0" placeholderTextColor="#9AA49F" /></Field>
         </View>)}
       </>}
       <Text style={[s.itemsTitle, { marginTop: 14 }]}>Yana anjom olib ketdimi?</Text>
       <Text style={s.returnHint}>Omborda mavjud anjomdan qo‘shimcha berilgan miqdorni kiriting. Bu anjom uchun hisob bugundan boshlanadi.</Text>
       {(equipment || []).map((item) => <View key={item.id} style={s.returnItemCard}>
         <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Omborda mavjud: {item.availableQuantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.availableQuantity}</Text></View>
-        <Field label="QO‘SHILADIGAN SON"><TextInput style={s.input} value={addQuantities[item.id] ?? '0'} onChangeText={(value) => updateAddQuantity(item.id, value)} keyboardType="number-pad" placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+        <Field label="QO‘SHILADIGAN SON"><TextInput style={s.input} value={addQuantities[item.id] ?? '0'} onChangeText={(value) => updateAddQuantity(item.id, value)} keyboardType="number-pad" selectTextOnFocus placeholder="0" placeholderTextColor="#9AA49F" /></Field>
       </View>)}
     </ScrollView>
+    {saveError ? <View style={s.editSaveError}><MaterialCommunityIcons name="alert-circle-outline" size={24} color={C.redDark} /><Text style={s.editSaveErrorText}>{saveError}</Text></View> : null}
     <Pressable disabled={saving} style={[s.mainButton, saving && { opacity: .65 }]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>Saqlash</Text>}</Pressable>
   </>}</KeyboardAvoidingView></View></Modal>;
 }
@@ -1155,6 +1181,7 @@ const s = StyleSheet.create({
   modalPage: { flex: 1, backgroundColor: C.white }, modalContent: { padding: 20, paddingBottom: 42 }, modalHeader: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 20 }, modalTitle: { color: C.ink, fontSize: 28.6, fontWeight: '500' }, modalSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, closeButton: { width: 42, height: 42, borderRadius: 10, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' }, closeText: { color: C.ink, fontSize: 28.6, fontWeight: '400', marginTop: -2 }, field: { marginBottom: 14 }, fieldLabel: { color: C.muted, fontSize: 20, fontWeight: '400', letterSpacing: .7, marginBottom: 7 }, input: { height: 56, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, paddingHorizontal: 16, fontSize: 20, fontWeight: '400', color: C.ink }, itemsHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 5, marginBottom: 10 }, itemsTitle: { fontSize: 20.8, fontWeight: '500', color: C.ink }, itemsCount: { color: C.muted, fontSize: 20, fontWeight: '400' }, itemEditor: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 16, marginBottom: 9 }, itemEditorTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 9 }, itemNumber: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .7 }, removeText: { color: C.redDark, fontSize: 20, fontWeight: '400' }, suggestions: { gap: 6, paddingVertical: 8 }, suggestion: { borderRadius: 10, paddingVertical: 6, paddingHorizontal: 10, backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: C.line }, suggestionActive: { backgroundColor: C.greenSoft, borderColor: C.blueLine }, suggestionText: { fontSize: 20, color: C.muted, fontWeight: '400' }, suggestionTextActive: { color: C.green2 }, twoColumns: { flexDirection: 'row', gap: 10, marginTop: 2 }, addItem: { height: 52, borderRadius: 12, borderWidth: 1, borderStyle: 'dashed', borderColor: C.blueLine, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, addItemText: { color: C.green2, fontSize: 20, fontWeight: '400' }, dailyTotal: { padding: 14, borderRadius: 12, backgroundColor: C.orangeSoft, borderWidth: 1, borderColor: C.blueLine, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }, dailyLabel: { color: C.muted, fontSize: 20, fontWeight: '400' }, dailyValue: { color: C.green2, fontSize: 20.8, fontWeight: '500' }, mainButton: { minHeight: 56, backgroundColor: C.green, borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 }, mainButtonText: { color: C.white, fontSize: 20, fontWeight: '500' },
   detailSummary: { backgroundColor: C.orangeSoft, borderWidth: 1, borderColor: C.blueLine, borderRadius: 14, padding: 20, marginBottom: 18 }, detailLabel: { color: C.green2, fontSize: 20, letterSpacing: 1, fontWeight: '400' }, detailTotal: { color: C.green2, fontSize: 35.1, fontWeight: '500', marginTop: 6 }, detailDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 8 }, detailSectionHeader: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4, marginBottom: 1 }, detailSectionCount: { color: C.muted, fontSize: 20, fontWeight: '400' }, paidSectionTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, detailItem: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 16, marginTop: 8 }, detailItemTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, detailItemName: { color: C.ink, fontSize: 20, fontWeight: '500' }, detailItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, detailItemTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, returnButton: { borderRadius: 12, backgroundColor: C.green, alignItems: 'center', paddingVertical: 15, marginTop: 12 }, returnButtonText: { color: C.white, fontWeight: '500', fontSize: 20 }, returnHistoryItem: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 13, marginTop: 8 }, returnHistoryAmount: { color: C.green2, fontSize: 20, fontWeight: '400' }, paidBadge: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.greenSoft, paddingHorizontal: 8, paddingVertical: 4, marginTop: 9 }, paidBadgeText: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .4 }, receiptButton: { borderRadius: 10, borderWidth: 1, borderColor: C.green, alignItems: 'center', paddingVertical: 12, marginTop: 15 }, receiptButtonText: { color: C.green2, fontWeight: '500', fontSize: 20 },
   overlay: { flex: 1, backgroundColor: 'rgba(17,24,39,.35)', justifyContent: 'flex-end' }, returnSheet: { maxHeight: '89%', backgroundColor: C.white, padding: 18, paddingBottom: Platform.OS === 'ios' ? 32 : 20, borderTopLeftRadius: 16, borderTopRightRadius: 16 }, returnHint: { fontSize: 20, lineHeight: 24, color: C.muted, fontWeight: '400', marginBottom: 12 }, returnItemsScroll: { flexGrow: 0, marginBottom: 13 }, returnItemsList: { gap: 8 }, returnItemCard: { backgroundColor: C.white, borderRadius: 14, borderWidth: 1, borderColor: C.line, padding: 16 }, returnItemHeading: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', marginBottom: 9 }, returnItemMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, returnMax: { color: C.green2, fontSize: 20, fontWeight: '400' },
+  editSaveError: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, borderRadius: 12, padding: 12, marginBottom: 10 }, editSaveErrorText: { flex: 1, color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' },
   receiptPaper: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 18, marginBottom: 13 }, receiptHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderStyle: 'dashed', borderBottomColor: C.line }, receiptNumber: { color: C.muted, fontSize: 20, fontWeight: '400' }, receiptCustomer: { alignItems: 'center', paddingVertical: 17 }, receiptName: { color: C.ink, fontSize: 20, fontWeight: '500' }, receiptDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 7 }, receiptSectionTitle: { color: C.green2, fontSize: 20, letterSpacing: .8, fontWeight: '400', marginBottom: 2 }, receiptRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: C.line }, receiptItemName: { color: C.ink, fontSize: 20, fontWeight: '400' }, receiptItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, receiptPaidAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentBlock: { marginTop: 12, backgroundColor: C.orangeSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: C.blueLine }, receiptCurrentTitle: { color: C.green2, fontSize: 20, letterSpacing: .45, fontWeight: '400', marginBottom: 7 }, receiptOpenRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 5 }, receiptOpenAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentTotal: { color: C.green2, fontWeight: '500', fontSize: 20.8, textAlign: 'right', paddingTop: 8, marginTop: 4, borderTopWidth: 1, borderTopColor: C.blueLine }, receiptReminder: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 10 }, receiptGrand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 15, marginTop: 13, borderTopWidth: 1, borderTopColor: C.ink }, receiptGrandLabel: { color: C.ink, fontSize: 20, fontWeight: '500', maxWidth: '56%' }, receiptGrandValue: { color: C.green2, fontSize: 23.3, fontWeight: '500' }, receiptActionGrid: { flexDirection: 'row', gap: 8, marginBottom: 13 }, receiptAction: { flex: 1, minHeight: 78, paddingVertical: 11, paddingHorizontal: 8, borderWidth: 1, borderColor: C.green, borderRadius: 10, alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: C.white }, receiptActionPrimary: { backgroundColor: C.green, borderColor: C.green }, receiptActionOrange: { borderColor: C.blueLine, backgroundColor: C.orangeSoft }, receiptActionIcon: { color: C.green2, fontSize: 22.1, fontWeight: '400' }, receiptActionLabel: { color: C.green2, fontSize: 20, textAlign: 'center', fontWeight: '400' }, shareHint: { textAlign: 'center', color: C.muted, fontSize: 20, fontWeight: '400', marginBottom: 10 }, shareButton: { minHeight: 44, borderRadius: 10, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', backgroundColor: C.white }, shareButtonText: { color: C.green2, fontSize: 20, fontWeight: '400' },
 });
 

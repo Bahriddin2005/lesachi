@@ -455,7 +455,7 @@ begin
 
     insert into public.rental_items (
       id, rental_id, equipment_type_id, name, quantity, daily_price,
-      started_at, status, returned_at, frozen_amount
+      started_at, status, returned_at, frozen_amount, paid
     ) values (
       item->>'id',
       p_rental_id,
