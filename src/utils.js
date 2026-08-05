@@ -480,7 +480,64 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
   return lines.join('\n');
 }
 
-/** A concise customer-facing message; the detailed receipt text remains for PDF/share. */
+function smsMoney(value) {
+  return formatMoney(value).replace('so‘m', "so'm");
+}
+
+function smsDate(value) {
+  const parsed = new Date(value || new Date());
+  const safeDate = Number.isFinite(parsed.getTime()) ? parsed : new Date();
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(safeDate);
+}
+
+function newRentalSmsText(breakdown) {
+  const { rental, addedItems, openItems, addedItemIds } = breakdown;
+  const items = addedItems.length ? addedItems : openItems;
+  const isAdditionalRental = addedItemIds.length > 0;
+  const startedAt = isAdditionalRental
+    ? items.reduce((earliest, item) => {
+      const itemTime = new Date(item.startedAt).getTime();
+      if (!Number.isFinite(itemTime)) return earliest;
+      return !earliest || itemTime < earliest ? itemTime : earliest;
+    }, null)
+    : rental.startedAt;
+  const itemLines = items.flatMap((item) => {
+    const quantity = Math.max(0, numberValue(item.quantity));
+    const dailyPrice = Math.max(0, numberValue(item.dailyPrice));
+    const days = Math.max(1, numberValue(item.days) || 1);
+    const amount = Math.max(0, numberValue(item.amount));
+    return [
+      `• ${item.name} × ${quantity} — ${smsMoney(dailyPrice)}/kun`,
+      `   ${quantity} dona × ${days} kun (hozircha mijozda) = ${smsMoney(amount)}`,
+      `   ⤵ Jami: ${smsMoney(amount)}`,
+    ];
+  });
+  const total = items.reduce((sum, item) => sum + Math.max(0, numberValue(item.amount)), 0);
+  return [
+    '🧾 IJARA CHEKI',
+    '━━━━━━━━━━━━━━━━━━',
+    `👤 Mijoz: ${rental.customerName || '—'}`,
+    `📞 Tel: ${rental.phone || '—'}`,
+    `📅 Olindi: ${smsDate(startedAt || rental.startedAt)}`,
+    `📅 Hisob sanasi: ${smsDate(new Date())}`,
+    '━━━━━━━━━━━━━━━━━━',
+    'Anjomlar:',
+    ...(itemLines.length ? itemLines : ['• Anjom topilmadi']),
+    '━━━━━━━━━━━━━━━━━━',
+    `💰 JAMI: ${smsMoney(total)}`,
+    '',
+    'Rahmat! 🙏',
+  ].join('\n');
+}
+
+/** A customer-facing message used by the SMS button and the manual SMS queue. */
 export function receiptSmsText(rentalOrReceipt, receiptContext = {}) {
   const breakdown = receiptBreakdown(rentalOrReceipt, receiptContext);
   const { type, returnedItems, addedItems, openItems, returnedTotal, currentDebt, finalTotal } = breakdown;
@@ -507,7 +564,7 @@ export function receiptSmsText(rentalOrReceipt, receiptContext = {}) {
     return `Lesachi: Barcha anjomlar qabul qilindi. Yakuniy to‘lov ${formatMoney(finalTotal)}. Rahmat!`;
   }
   if (type === 'new') {
-    return `Lesachi: Sizga ${openDescription(openItems)} ijaraga berildi. Joriy qarzingiz ${formatMoney(currentDebt)}.`;
+    return newRentalSmsText(breakdown);
   }
   if (openItems.length) {
     return `Lesachi: Sizda ${openDescription(openItems)} bor, joriy qarzingiz ${formatMoney(currentDebt)}.`;
