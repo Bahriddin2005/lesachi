@@ -48,6 +48,7 @@ function toItem(row) {
     status: row.status === 'returned' ? 'returned' : 'open',
     returnedAt: row.returned_at || row.returnedAt || null,
     frozenAmount: row.frozen_amount ?? row.frozenAmount ?? null,
+    paid: row.paid === true,
     returns: row.status === 'returned'
       ? [{
         id: `return_${row.id}`,
@@ -312,6 +313,11 @@ export async function editRental(rentalId, changes = {}) {
   };
 }
 
+export async function markRentalItemPaid(itemId) {
+  await unwrap(requireClient().rpc('mark_rental_item_paid', { p_item_id: itemId }));
+  return itemId;
+}
+
 export async function registerReturn(rentalId, returnsOrItemId, legacyQuantity) {
   const requests = normaliseReturnRequests(returnsOrItemId, legacyQuantity);
   const returnedAt = new Date().toISOString();
@@ -357,4 +363,40 @@ export async function logSentMessage(rentalId, channel, message, status = 'sent'
     status,
     created_at: new Date().toISOString(),
   }));
+}
+
+export async function queueSms(payload) {
+  const id = createId('sms');
+  await unwrap(requireClient().from('sms_queue').insert({
+    id,
+    rental_id: payload.rentalId || null,
+    customer_phone: payload.phone,
+    message: payload.message,
+    status: 'pending',
+    created_at: new Date().toISOString(),
+  }));
+  return id;
+}
+
+export async function fetchSmsQueue() {
+  const rows = await unwrap(requireClient().from('sms_queue').select('*').order('created_at', { ascending: false }));
+  return (rows || []).map((row) => ({
+    id: row.id,
+    rentalId: row.rental_id,
+    phone: row.customer_phone,
+    message: row.message,
+    status: row.status,
+    errorMessage: row.error_message || null,
+    createdAt: row.created_at,
+    sentAt: row.sent_at || null,
+  }));
+}
+
+export async function updateSmsQueue(id, status, errorMessage = null) {
+  await unwrap(requireClient().from('sms_queue').update({
+    status,
+    error_message: errorMessage,
+    sent_at: status === 'sent' ? new Date().toISOString() : null,
+  }).eq('id', id));
+  return id;
 }

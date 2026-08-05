@@ -23,6 +23,11 @@ export function editRental(db, rentalId, changes) {
     ? remote.editRental(rentalId, changes)
     : local.editRental(db, rentalId, changes);
 }
+export function markRentalItemPaid(db, itemId) {
+  return usesRemoteDatabase
+    ? remote.markRentalItemPaid(itemId)
+    : local.markRentalItemPaid(db, itemId);
+}
 export function registerReturn(db, rentalId, returns, legacyQuantity) {
   return usesRemoteDatabase
     ? remote.registerReturn(rentalId, returns, legacyQuantity)
@@ -34,6 +39,15 @@ export function logSentMessage(db, rentalId, channel, message, status) {
   return usesRemoteDatabase
     ? remote.logSentMessage(rentalId, channel, message, status)
     : local.logSentMessage(db, rentalId, channel, message, status);
+}
+export function queueSms(db, payload) {
+  return usesRemoteDatabase ? remote.queueSms(payload) : local.queueSms(db, payload);
+}
+export function fetchSmsQueue(db) {
+  return usesRemoteDatabase ? remote.fetchSmsQueue() : local.fetchSmsQueue(db);
+}
+export function updateSmsQueue(db, id, status, errorMessage) {
+  return usesRemoteDatabase ? remote.updateSmsQueue(id, status, errorMessage) : local.updateSmsQueue(db, id, status, errorMessage);
 }
 
 export const migrateDatabase = local.migrateDatabase;

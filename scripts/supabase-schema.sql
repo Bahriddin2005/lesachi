@@ -32,7 +32,8 @@ create table if not exists public.rental_items (
   started_at timestamptz not null,
   status text not null default 'open',
   returned_at timestamptz,
-  frozen_amount integer
+  frozen_amount integer,
+  paid boolean not null default false
 );
 
 create table if not exists public.item_returns (
@@ -49,6 +50,17 @@ create table if not exists public.sent_messages (
   message text not null,
   status text not null,
   created_at timestamptz not null
+);
+
+create table if not exists public.sms_queue (
+  id text primary key,
+  rental_id text references public.rentals(id) on delete cascade,
+  customer_phone text not null,
+  message text not null,
+  status text not null default 'pending',
+  error_message text,
+  created_at timestamptz not null,
+  sent_at timestamptz
 );
 
 create table if not exists public.settings (
@@ -69,7 +81,7 @@ declare table_name text;
 begin
   foreach table_name in array array[
     'customers', 'equipment_types', 'rentals', 'rental_items',
-    'item_returns', 'sent_messages', 'settings'
+    'item_returns', 'sent_messages', 'sms_queue', 'settings'
   ] loop
     execute format('grant select, insert, update, delete on table public.%I to anon, authenticated', table_name);
     execute format('alter table public.%I enable row level security', table_name);
@@ -80,6 +92,9 @@ begin
     );
   end loop;
 end $$;
+
+alter table public.rental_items
+  add column if not exists paid boolean not null default false;
 
 -- Partial returns must be atomic.  The browser invokes this function through
 -- Supabase RPC, while row locks prevent two users from returning the same
@@ -142,7 +157,8 @@ begin
     set quantity = requested_quantity,
         status = 'returned',
         returned_at = p_returned_at,
-        frozen_amount = frozen_amount_value
+        frozen_amount = frozen_amount_value,
+        paid = false
     where id = source_item.id;
 
     insert into public.item_returns (id, rental_item_id, quantity, returned_at)
@@ -163,14 +179,15 @@ begin
       'startedAt', started_at_value,
       'status', 'returned',
       'returnedAt', p_returned_at,
-      'frozenAmount', frozen_amount_value
+      'frozenAmount', frozen_amount_value,
+      'paid', false
     ));
 
     if remaining_quantity > 0 then
       generated_item_id := 'item_' || substr(md5(random()::text || clock_timestamp()::text), 1, 24);
       insert into public.rental_items (
         id, rental_id, equipment_type_id, name, quantity, daily_price,
-        started_at, status, returned_at, frozen_amount
+        started_at, status, returned_at, frozen_amount, paid
       ) values (
         generated_item_id,
         source_item.rental_id,
@@ -181,7 +198,8 @@ begin
         started_at_value,
         'open',
         null,
-        null
+        null,
+        false
       );
     end if;
   end loop;
@@ -196,7 +214,8 @@ begin
     'startedAt', ri.started_at,
     'status', ri.status,
     'returnedAt', ri.returned_at,
-    'frozenAmount', ri.frozen_amount
+    'frozenAmount', ri.frozen_amount,
+    'paid', ri.paid
   ) order by ri.id), '[]'::jsonb)
   into remaining_rows
   from public.rental_items ri
@@ -219,6 +238,26 @@ end;
 $$;
 
 grant execute on function public.register_rental_return(text, jsonb, timestamptz)
+  to anon, authenticated;
+
+create or replace function public.mark_rental_item_paid(p_item_id text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.rental_items
+  set paid = true
+  where id = p_item_id and status = 'returned';
+  if not found then
+    raise exception 'Faqat qaytarilgan anjom uchun to‘lovni tasdiqlash mumkin.';
+  end if;
+  return true;
+end;
+$$;
+
+grant execute on function public.mark_rental_item_paid(text)
   to anon, authenticated;
 
 -- Unified customer edit: return existing items and add newly borrowed items
@@ -300,7 +339,7 @@ begin
     item_id := coalesce(nullif(trim(item->>'id'), ''), 'item_' || substr(md5(random()::text || clock_timestamp()::text), 1, 24));
     insert into public.rental_items (
       id, rental_id, equipment_type_id, name, quantity, daily_price,
-      started_at, status, returned_at, frozen_amount
+      started_at, status, returned_at, frozen_amount, paid
     ) values (
       item_id,
       p_rental_id,
@@ -324,7 +363,8 @@ begin
       'startedAt', p_changed_at,
       'status', 'open',
       'returnedAt', null,
-      'frozenAmount', null
+      'frozenAmount', null,
+      'paid', false
     ));
   end loop;
 
@@ -347,7 +387,8 @@ begin
     'startedAt', ri.started_at,
     'status', ri.status,
     'returnedAt', ri.returned_at,
-    'frozenAmount', ri.frozen_amount
+    'frozenAmount', ri.frozen_amount,
+    'paid', ri.paid
   ) order by ri.id), '[]'::jsonb)
   into remaining_rows
   from public.rental_items ri
@@ -424,7 +465,8 @@ begin
       p_started_at,
       'open',
       null,
-      null
+      null,
+      false
     );
   end loop;
 

@@ -27,11 +27,15 @@ import {
   editRental,
   deleteEquipmentType,
   fetchEquipmentTypes,
+  fetchSmsQueue,
   fetchRentals,
   getSetting,
   logSentMessage,
+  markRentalItemPaid,
   migrateDatabase,
   setSetting,
+  queueSms,
+  updateSmsQueue,
   updateEquipmentType,
   usesRemoteDatabase,
 } from './src/data';
@@ -50,7 +54,7 @@ import {
   receiptText,
   rentalTotal,
 } from './src/utils';
-import { downloadReceiptPdf, printReceipt, sendReceiptSms } from './src/receiptActions';
+import { downloadReceiptPdf, printReceipt, sendReceiptSms, sendSmsMessage } from './src/receiptActions';
 
 const C = {
   green: '#2563EB',
@@ -96,6 +100,7 @@ function LesaApp({ db }) {
   const [screen, setScreen] = useState('home');
   const [rentals, setRentals] = useState([]);
   const [equipment, setEquipment] = useState([]);
+  const [smsQueue, setSmsQueue] = useState([]);
   const [channel, setChannel] = useState('Telegram');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -110,17 +115,20 @@ function LesaApp({ db }) {
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
   const [appInstalled, setAppInstalled] = useState(false);
   const [splashReady, setSplashReady] = useState(false);
+  const [smsSending, setSmsSending] = useState(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setRefreshing(true);
     try {
-      const [rentalRows, equipmentRows, savedChannel] = await Promise.all([
+      const [rentalRows, equipmentRows, savedChannel, smsRows] = await Promise.all([
         fetchRentals(db),
         fetchEquipmentTypes(db),
         getSetting(db, 'message_channel'),
+        fetchSmsQueue(db),
       ]);
       setRentals(rentalRows);
       setEquipment(equipmentRows);
+      setSmsQueue(smsRows);
       if (savedChannel) setChannel(savedChannel);
       return rentalRows;
     } finally {
@@ -145,6 +153,14 @@ function LesaApp({ db }) {
     const timer = setTimeout(() => setSplashReady(true), 1700);
     return () => clearTimeout(timer);
   }, []);
+
+  const enqueueSms = async (payload) => {
+    try {
+      await queueSms(db, payload);
+    } catch (queueError) {
+      Alert.alert('SMS navbatga qo‘shilmadi', queueError.message || 'SMS matnini navbatga qo‘shib bo‘lmadi.');
+    }
+  };
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return undefined;
@@ -176,7 +192,10 @@ function LesaApp({ db }) {
       setNewOpen(false);
       const rows = await load(true);
       const created = rows.find((row) => row.id === rentalId);
-      if (created) setTimeout(() => setReceipt({ rental: created, context: { type: 'new' } }), 350);
+      if (created) {
+        await enqueueSms({ rentalId: created.id, phone: created.phone, message: receiptSmsText(created, { type: 'new' }) });
+        setTimeout(() => setReceipt({ rental: created, context: { type: 'new' } }), 350);
+      }
     } catch (error) {
       Alert.alert('Ijara saqlanmadi', error.message || 'Ijarani saqlashda xatolik yuz berdi.');
     }
@@ -189,10 +208,56 @@ function LesaApp({ db }) {
       const updated = rows.find((row) => row.id === editTarget.id);
       setEditTarget(null);
       setSelected(null);
-      if (updated) setTimeout(() => setReceipt({ rental: updated, context: outcome.receipt }), 350);
+      if (updated) {
+        if (outcome.returnedRows.length) {
+          const returnType = outcome.wasClosed && !outcome.addedRows.length ? 'final' : 'partial';
+          await enqueueSms({
+            rentalId: updated.id,
+            phone: updated.phone,
+            message: receiptSmsText(updated, { type: returnType, returnedItemIds: outcome.returnedRows.map((item) => item.id) }),
+          });
+        }
+        if (outcome.addedRows.length) {
+          await enqueueSms({
+            rentalId: updated.id,
+            phone: updated.phone,
+            message: receiptSmsText(updated, { type: 'new', addedItemIds: outcome.addedRows.map((item) => item.id) }),
+          });
+        }
+        setTimeout(() => setReceipt({ rental: updated, context: outcome.receipt }), 350);
+      }
     } catch (error) {
       Alert.alert('O‘zgarishlar saqlanmadi', error.message || 'O‘zgarishlarni saqlashda xatolik yuz berdi.');
     }
+  };
+
+  const confirmPaid = async (itemId) => {
+    try {
+      await markRentalItemPaid(db, itemId);
+      const rows = await load(true);
+      if (selected) setSelected(rows.find((row) => row.id === selected.id) || selected);
+    } catch (error) {
+      Alert.alert('To‘lov saqlanmadi', error.message || 'To‘lov holatini o‘zgartirib bo‘lmadi.');
+    }
+  };
+
+  const sendQueuedSms = async (item) => {
+    setSmsSending(item.id);
+    try {
+      await sendSmsMessage(item.phone, item.message);
+      await updateSmsQueue(db, item.id, 'sent', null);
+    } catch (error) {
+      await updateSmsQueue(db, item.id, 'error', error.message || 'SMS yuborilmadi.');
+      Alert.alert('SMS yuborilmadi', error.message || 'SMS oynasini ochib bo‘lmadi.');
+    } finally {
+      setSmsSending(null);
+      await load(true);
+    }
+  };
+
+  const sendAllQueuedSms = async () => {
+    const pending = smsQueue.filter((item) => item.status === 'pending' || item.status === 'error');
+    for (const item of pending) await sendQueuedSms(item);
   };
 
   const changeChannel = async (next) => {
@@ -308,6 +373,7 @@ function LesaApp({ db }) {
         {screen === 'home' && (
           <Dashboard
             rentals={active}
+            pendingRentals={rentals.filter((rental) => pendingPaymentItems(rental).length > 0)}
             refreshing={refreshing}
             onRefresh={() => load()}
             onNew={() => setNewOpen(true)}
@@ -318,7 +384,8 @@ function LesaApp({ db }) {
         {screen === 'history' && (
           <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: 'final' } })} />
         )}
-        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} onInventory={() => setScreen('inventory')} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
+        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
+        {screen === 'sms' && <SmsQueue items={smsQueue} sending={smsSending} onSend={sendQueuedSms} onSendAll={sendAllQueuedSms} onBack={() => setScreen('settings')} />}
         {screen === 'inventory' && <Inventory equipment={equipment} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen('settings')} onAdd={() => setEquipmentEditor({ mode: 'create', item: null })} onEdit={(item) => setEquipmentEditor({ mode: 'edit', item })} onDelete={handleDeleteEquipment} />}
 
         <BottomNav screen={screen} onChange={setScreen} />
@@ -329,6 +396,7 @@ function LesaApp({ db }) {
         rental={selected}
         onClose={() => setSelected(null)}
         onEdit={() => setEditTarget(selected)}
+        onPay={confirmPaid}
         onReceipt={(rental) => { setSelected(null); setReceipt({ rental, context: { type: isClosed(rental) ? 'final' : 'current' } }); }}
       />
       <RentalEditModal target={editTarget} equipment={equipment} onClose={() => setEditTarget(null)} onSubmit={submitEdit} />
@@ -373,6 +441,18 @@ function returnedItems(rental) {
   return rental.items.filter((item) => item.status === 'returned' || (!item.status && openQuantity(item) === 0));
 }
 
+function pendingPaymentItems(rental) {
+  return returnedItems(rental).filter((item) => !item.paid);
+}
+
+function paidReturnedItems(rental) {
+  return returnedItems(rental).filter((item) => item.paid);
+}
+
+function pendingPaymentTotal(rental) {
+  return pendingPaymentItems(rental).reduce((total, item) => total + lineAmount(rental, item), 0);
+}
+
 function quantityOf(items) {
   return items.reduce((total, item) => total + Number(item.quantity || 0), 0);
 }
@@ -387,10 +467,11 @@ function statusTone(days) {
   return { color: C.neutral, background: '#F9FAFB', label: 'Yangi' };
 }
 
-function Dashboard({ rentals, refreshing, onRefresh, onNew, onRental }) {
+function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRental }) {
   const [query, setQuery] = useState('');
   const filtered = rentals.filter((rental) => `${rental.customerName} ${rental.phone}`.toLowerCase().includes(query.toLowerCase()));
   const debt = rentals.reduce((total, rental) => total + currentDebt(rental), 0);
+  const pendingTotal = pendingRentals.reduce((total, rental) => total + pendingPaymentTotal(rental), 0);
   const customerCount = new Set(rentals.map((rental) => rental.phone)).size;
 
   return (
@@ -408,6 +489,10 @@ function Dashboard({ rentals, refreshing, onRefresh, onNew, onRental }) {
           <View style={[s.metricCard, s.metricCardAmber, { backgroundColor: C.redSoft, borderColor: C.redLine }]}><Text style={[s.metricLabelAmber, { color: C.redDark }]}>JAMI QARZ</Text><Text style={[s.metricValueAmber, { color: C.redDark }]}>{formatMoney(debt)}</Text><Text style={[s.metricHintAmber, { color: C.redDark }]}>real-time hisob</Text></View>
         </View>
         <Pressable style={s.dashboardAddButton} onPress={onNew}><Text style={s.dashboardAddText}>＋  Yangi ijara qo‘shish</Text></Pressable>
+        {pendingRentals.length > 0 && <View style={s.pendingPanel}>
+          <View style={s.pendingPanelHead}><View><Text style={s.pendingPanelTitle}>To‘lov kutilmoqda</Text><Text style={s.pendingPanelSub}>Buyum qaytdi, to‘lov hali tasdiqlanmagan</Text></View><Text style={s.pendingPanelTotal}>{formatMoney(pendingTotal)}</Text></View>
+          {pendingRentals.map((rental) => <Pressable key={rental.id} style={s.pendingPanelRow} onPress={() => onRental(rental)}><View style={s.flex}><Text style={s.customerName}>{rental.customerName}</Text><Text style={s.phone}>{quantityOf(pendingPaymentItems(rental))} dona qaytgan anjom</Text></View><Text style={s.pendingPanelAmount}>{formatMoney(pendingPaymentTotal(rental))}</Text></Pressable>)}
+        </View>}
         <View style={s.sectionTitleRow}><View><Text style={s.sectionTitle}>Faol mijozlar</Text><Text style={s.sectionSub}>Qaytarilishi kutilayotgan ijaralar</Text></View><Text style={s.resultCount}>{filtered.length} ta</Text></View>
         <View style={s.searchBox}><Text style={s.searchIcon}>⌕</Text><TextInput value={query} onChangeText={setQuery} placeholder="Mijoz yoki telefon..." placeholderTextColor="#99A39F" style={s.searchInput} /></View>
       </>}
@@ -421,6 +506,7 @@ function Dashboard({ rentals, refreshing, onRefresh, onNew, onRental }) {
 function RentalCard({ rental, onPress }) {
   const remainingItems = openItems(rental);
   const returnedQuantity = quantityOf(returnedItems(rental));
+  const pendingItems = pendingPaymentItems(rental);
   const days = dayCount(rental.startedAt);
   const tone = statusTone(days);
   return (
@@ -428,7 +514,7 @@ function RentalCard({ rental, onPress }) {
       <View style={s.customerRow}><View style={[s.avatar, { backgroundColor: tone.background }]}><Text style={[s.avatarText, { color: tone.color }]}>{initials(rental.customerName)}</Text></View><View style={s.flex}><Text style={s.customerName}>{rental.customerName}</Text><Text style={s.phone}>{days} kundan beri qaytarmagan</Text></View><View style={s.cardAmount}><Text style={s.cardAmountLabel}>JORIY QARZ</Text><Text style={[s.cardAmountValue, { color: C.redDark }]}>{formatMoney(currentDebt(rental))}</Text></View></View>
       <View style={s.cardDivider} />
       <View style={s.rentalMeta}><Meta label="MIJOZDA" value={`${quantityOf(remainingItems)} dona`} /><Meta label="HOLAT" value={tone.label} /><Meta label="KUNLIK" value={formatMoney(remainingItems.reduce((total, item) => total + Number(item.dailyPrice || 0) * Number(item.quantity || 0), 0))} /></View>
-      {returnedQuantity > 0 && <View style={s.cardPaidNote}><Text style={[s.cardPaidNoteText, { color: C.successDark }]}>✓ {returnedQuantity} dona qaytarilgan · {formatMoney(paidTotal(rental))} to‘langan</Text></View>}
+      {returnedQuantity > 0 && <View style={s.cardPaidNote}><Text style={[s.cardPaidNoteText, { color: pendingItems.length ? C.orange : C.successDark }]}>{pendingItems.length ? `! ${quantityOf(pendingItems)} dona qaytdi · ${formatMoney(pendingPaymentTotal(rental))} to‘lov kutilmoqda` : `✓ ${returnedQuantity} dona qaytarilgan · ${formatMoney(paidTotal(rental))} to‘langan`}</Text></View>}
     </Pressable>
   );
 }
@@ -446,7 +532,7 @@ function History({ rentals, refreshing, onRefresh, onReceipt }) {
       keyExtractor={(item) => item.id}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green} />}
       ListHeaderComponent={<><View style={s.topBrand}><Brand /></View><Header title="Ijara tarixi" subtitle="Yakunlangan hisob-kitoblar" /></>}
-      renderItem={({ item }) => <Pressable style={s.historyCard} onPress={() => onReceipt(item)}><View style={s.historyTop}><View style={s.avatar}><Text style={s.avatarText}>{initials(item.customerName)}</Text></View><View style={s.flex}><Text style={s.customerName}>{item.customerName}</Text><Text style={s.phone}>{formatDate(item.closedAt || new Date(), true)}</Text></View><View style={s.doneBadge}><Text style={[s.doneText, { color: C.successDark }]}>YOPILGAN</Text></View></View><View style={s.cardDivider} /><View style={s.historyBottom}><Text style={s.historyItems}>{item.items.length} turdagi anjom</Text><Text style={s.historyTotal}>{formatMoney(rentalTotal(item))}</Text></View></Pressable>}
+      renderItem={({ item }) => <Pressable style={s.historyCard} onPress={() => onReceipt(item)}><View style={s.historyTop}><View style={s.avatar}><Text style={s.avatarText}>{initials(item.customerName)}</Text></View><View style={s.flex}><Text style={s.customerName}>{item.customerName}</Text><Text style={s.phone}>{formatDate(item.closedAt || new Date(), true)}</Text></View><View style={s.doneBadge}><Text style={[s.doneText, { color: pendingPaymentItems(item).length ? C.orange : C.successDark }]}>{pendingPaymentItems(item).length ? 'TO‘LOV KUTILMOQDA' : 'YOPILGAN'}</Text></View></View><View style={s.cardDivider} /><View style={s.historyBottom}><Text style={s.historyItems}>{item.items.length} turdagi anjom</Text><Text style={s.historyTotal}>{formatMoney(rentalTotal(item))}</Text></View></Pressable>}
       ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
       ListEmptyComponent={<Empty title="Tarix hozircha bo‘sh" text="To‘liq qaytarilgan ijaralar shu yerda ko‘rinadi." />}
     />
@@ -602,7 +688,23 @@ function EquipmentDeleteModal({ item, error, onClose, onConfirm }) {
   );
 }
 
-function Settings({ channel, onChange, onInventory, onInstallApp, installAvailable, installed, remoteMode }) {
+function SmsQueue({ items, sending, onSend, onSendAll, onBack }) {
+  const pending = items.filter((item) => item.status === 'pending' || item.status === 'error');
+  return <ScrollView style={s.screen} contentContainerStyle={s.screenContent}>
+    <View style={s.inventoryTopRow}><Pressable style={s.inventoryBackButton} onPress={onBack} hitSlop={8}><Text style={s.inventoryBackText}>‹</Text></Pressable><Text style={s.inventoryTitle}>SMS navbati</Text><View style={{ width: 36 }} /></View>
+    <Text style={s.inventorySubtitle}>Xabarlar avval navbatga tushadi, yuborish faqat qo‘lda tasdiqlanadi.</Text>
+    {pending.length > 0 && <Pressable style={s.inventoryAddButton} onPress={onSendAll} disabled={Boolean(sending)}><Text style={s.inventoryAddText}>Barchasini yuborish ({pending.length})</Text></Pressable>}
+    {items.map((item) => <View key={item.id} style={s.smsQueueCard}>
+      <View style={s.smsQueueHead}><View style={s.flex}><Text style={s.customerName}>{item.phone}</Text><Text style={s.phone}>{formatDate(item.createdAt, true)}</Text></View><Text style={[s.smsQueueStatus, { color: item.status === 'sent' ? C.successDark : item.status === 'error' ? C.redDark : C.orange }]}>{item.status === 'sent' ? 'YUBORILDI' : item.status === 'error' ? 'XATOLIK' : 'KUTILMOQDA'}</Text></View>
+      <Text style={s.smsQueueMessage}>{item.message}</Text>
+      {item.errorMessage && <Text style={s.smsQueueError}>{item.errorMessage}</Text>}
+      {(item.status === 'pending' || item.status === 'error') && <Pressable style={s.smsQueueSend} onPress={() => onSend(item)} disabled={Boolean(sending)}><Text style={s.smsQueueSendText}>{sending === item.id ? 'Yuborilmoqda...' : 'Yuborish'}</Text></Pressable>}
+    </View>)}
+    {!items.length && <Empty title="SMS navbati bo‘sh" text="Ijara yoki qaytarishdan keyin xabar shu yerga qo‘shiladi." />}
+  </ScrollView>;
+}
+
+function Settings({ channel, onChange, onInventory, onSmsQueue, smsPendingCount, onInstallApp, installAvailable, installed, remoteMode }) {
   const storageLabel = remoteMode ? 'Umumiy Supabase bazasi' : 'Qurilma SQLite bazasi';
   const storageNote = remoteMode
     ? 'Production rejimida barcha ma’lumotlar umumiy onlayn bazada saqlanadi va boshqa foydalanuvchilarga ko‘rinadi.'
@@ -619,6 +721,7 @@ function Settings({ channel, onChange, onInventory, onInstallApp, installAvailab
       </Pressable>
       <View style={s.settingsCard}><Text style={s.settingsTitle}>Ma’lumotlar</Text><InfoRow label="Saqlash" value={storageLabel} /><InfoRow label="Hisoblash" value="Real-time, cron ishlatilmaydi" /><InfoRow label="Versiya" value="1.0.0 MVP" /></View>
       <Pressable style={s.inventoryLink} onPress={onInventory}><View><Text style={s.settingsTitle}>Ombor jadvali</Text><Text style={s.settingsText}>Anjomlar va faol ijaradagi sonlarni ko‘rish</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
+      <Pressable style={s.inventoryLink} onPress={onSmsQueue}><View><Text style={s.settingsTitle}>SMS navbati</Text><Text style={s.settingsText}>{smsPendingCount ? `${smsPendingCount} ta xabar yuborishni kutmoqda` : 'Yuborilgan va kutilayotgan xabarlar'}</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
       <View style={s.note}><Text style={s.noteTitle}>Eslatma</Text><Text style={s.noteText}>{storageNote} SMS/Telegram/WhatsApp yuborish uchun tegishli API ulanishi kerak.</Text></View>
     </ScrollView>
   );
@@ -709,9 +812,10 @@ function NewRentalModal({ open, equipment, onClose, onSubmit }) {
   );
 }
 
-function RentalDetail({ rental, onClose, onEdit, onReceipt }) {
+function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
   const activeItems = rental ? openItems(rental) : [];
-  const paidItems = rental ? returnedItems(rental) : [];
+  const pendingItems = rental ? pendingPaymentItems(rental) : [];
+  const paidItems = rental ? paidReturnedItems(rental) : [];
   const activeQuantity = quantityOf(activeItems);
 
   return <Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
@@ -726,6 +830,14 @@ function RentalDetail({ rental, onClose, onEdit, onReceipt }) {
       <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>Joriy holat</Text><Text style={s.detailSectionCount}>{activeQuantity} dona mijozda</Text></View>
       {activeItems.map((item) => <View key={item.id} style={s.detailItem}>
         <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>{item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>Olingan: {formatDate(item.startedAt || rental.startedAt, true)} · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={[s.detailItemTotal, { color: C.redDark }]}>{formatMoney(itemTotal(rental, item))}</Text></View>
+      </View>)}
+    </>}
+
+    {pendingItems.length > 0 && <>
+      <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>To‘lov kutilmoqda</Text><Text style={[s.paidSectionTotal, { color: C.orange }]}>{formatMoney(pendingPaymentTotal(rental))}</Text></View>
+      {pendingItems.map((item) => <View key={item.id} style={[s.returnHistoryItem, s.pendingPaymentCard]}>
+        <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>↩ {item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>{formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · to‘lov kutilmoqda</Text></View><Text style={[s.returnHistoryAmount, { color: C.orange }]}>{formatMoney(lineAmount(rental, item))}</Text></View>
+        <View style={s.pendingPaymentFooter}><Text style={[s.paidBadgeText, { color: C.orange }]}>BUYUM QAYTDI</Text><Pressable style={s.paidConfirmButton} onPress={() => onPay(item.id)}><Text style={s.paidConfirmText}>To‘landi</Text></Pressable></View>
       </View>)}
     </>}
 
@@ -811,6 +923,7 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
   const returnedTotal = breakdown?.returnedTotal ?? 0;
   const current = breakdown?.currentDebt ?? 0;
   const final = breakdown?.finalTotal ?? rentalTotal(rental || { items: [] });
+  const pendingReturned = returned.filter((item) => !item.paid);
   const title = isEdit ? 'Ijara o‘zgarishi cheki' : isPartial ? 'Qisman qaytarish cheki' : isFinal ? 'Yakuniy chek' : type === 'new' ? 'Yangi ijara cheki' : 'Joriy elektron chek';
   useEffect(() => setBusy(null), [rental?.id, type, context.returnedItemIds?.join(','), context.addedItemIds?.join(',')]);
   const run = async (name, action) => {
@@ -825,7 +938,7 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
 
       {returned.length > 0 && <>
         <Text style={s.receiptSectionTitle}>{isPartial ? 'QAYTARILGAN QISM' : 'QAYTARILGAN ANJOMLAR'}</Text>
-        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>✓ {item.name} × {item.quantity}</Text><Text style={s.receiptItemSub}>{dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · {formatMoney(item.dailyPrice)}/kun · TO‘LANDI</Text></View><Text style={[s.receiptPaidAmount, { color: C.successDark }]}>{formatMoney(lineAmount(rental, item))}</Text></View>)}
+        {returned.map((item) => <View key={item.id} style={s.receiptRow}><View style={s.flex}><Text style={s.receiptItemName}>{item.paid ? '✓' : '◷'} {item.name} × {item.quantity}</Text><Text style={s.receiptItemSub}>{dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · {formatMoney(item.dailyPrice)}/kun · {item.paid ? 'TO‘LANDI' : 'TO‘LOV KUTILMOQDA'}</Text></View><Text style={[s.receiptPaidAmount, { color: item.paid ? C.successDark : C.orange }]}>{formatMoney(lineAmount(rental, item))}</Text></View>)}
       </>}
 
       {isEdit && added.length > 0 && <>
@@ -840,8 +953,8 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
         {isPartial && <Text style={s.receiptReminder}>Qolgan {quantityOf(remaining)} dona anjom qaytarilmaguncha, kunlik hisob davom etadi.</Text>}
       </View>}
 
-      {(isPartial || isEdit) && returned.length > 0 && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>QAYTARILGAN QISM TO‘LANDI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(returnedTotal)}</Text></View>}
-      {isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>YAKUNIY JAMI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(final)}</Text></View>}
+      {(isPartial || isEdit) && returned.length > 0 && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>{pendingReturned.length ? 'TO‘LOV KUTILMOQDA' : 'QAYTARILGAN QISM TO‘LANDI'}</Text><Text style={[s.receiptGrandValue, { color: pendingReturned.length ? C.orange : C.successDark }]}>{formatMoney(returnedTotal)}</Text></View>}
+      {isFinal && (pendingReturned.length ? <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>TO‘LOV KUTILMOQDA</Text><Text style={[s.receiptGrandValue, { color: C.orange }]}>{formatMoney(pendingReturned.reduce((sum, item) => sum + lineAmount(rental, item), 0))}</Text></View> : <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>YAKUNIY JAMI</Text><Text style={[s.receiptGrandValue, { color: C.successDark }]}>{formatMoney(final)}</Text></View>)}
       {!isPartial && !isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>JORIY QARZ</Text><Text style={[s.receiptGrandValue, { color: C.redDark }]}>{formatMoney(current)}</Text></View>}
     </View>
     <View style={s.receiptActionGrid}><ReceiptAction icon="↓" label="PDF yuklab olish" primary busy={busy === 'pdf'} disabled={Boolean(busy)} onPress={() => run('pdf', onDownload)} /><ReceiptAction icon="▣" label="Chop etish" busy={busy === 'print'} disabled={Boolean(busy)} onPress={() => run('print', onPrint)} /><ReceiptAction icon="✉" label="SMS yuborish" orange busy={busy === 'sms'} disabled={Boolean(busy)} onPress={() => run('sms', onSms)} /></View>
@@ -897,4 +1010,7 @@ const installS = StyleSheet.create({
   installModalText: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginBottom: 8 },
   installCloseButton: { minHeight: 44, borderRadius: 10, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center', marginTop: 10 },
   installCloseText: { color: C.white, fontSize: 20, fontWeight: '500' },
+  pendingPanel: { backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FED7AA', borderRadius: 12, padding: 14, marginBottom: 18 }, pendingPanelHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, pendingPanelTitle: { color: '#9A3412', fontSize: 22, fontWeight: '500' }, pendingPanelSub: { color: '#C2410C', fontSize: 18, marginTop: 4 }, pendingPanelTotal: { color: '#C2410C', fontSize: 22, fontWeight: '500' }, pendingPanelRow: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#FED7AA', paddingTop: 10, marginTop: 10, gap: 10 }, pendingPanelAmount: { color: '#C2410C', fontSize: 20, fontWeight: '500' },
+  pendingPaymentCard: { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }, pendingPaymentFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 9 }, paidConfirmButton: { borderRadius: 10, backgroundColor: C.orange, paddingHorizontal: 14, paddingVertical: 8 }, paidConfirmText: { color: C.white, fontSize: 18, fontWeight: '500' },
+  smsQueueCard: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, marginTop: 10 }, smsQueueHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, smsQueueStatus: { fontSize: 16, fontWeight: '500', letterSpacing: .3 }, smsQueueMessage: { color: C.ink, fontSize: 19, lineHeight: 26, marginTop: 10 }, smsQueueError: { color: C.redDark, fontSize: 18, marginTop: 8 }, smsQueueSend: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.green, paddingHorizontal: 16, paddingVertical: 9, marginTop: 12 }, smsQueueSendText: { color: C.white, fontSize: 18, fontWeight: '500' },
 });

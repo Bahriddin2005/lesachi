@@ -23,13 +23,16 @@ export async function printReceipt(rentalOrReceipt, receiptContext) {
 
 export async function sendReceiptSms(rentalOrReceipt, receiptContext) {
   const { rental } = resolveReceipt(rentalOrReceipt, receiptContext);
+  return sendSmsMessage(rental.phone, receiptSmsText(rentalOrReceipt, receiptContext));
+}
+
+export async function sendSmsMessage(phone, message) {
   const available = await SMS.isAvailableAsync();
   if (!available) {
     const error = new Error('Bu qurilmada SMS xizmati mavjud emas.');
     error.code = 'SMS_UNAVAILABLE';
     throw error;
   }
-  const message = receiptSmsText(rentalOrReceipt, receiptContext);
-  const result = await SMS.sendSMSAsync([rental.phone], message);
+  const result = await SMS.sendSMSAsync([phone], message);
   return { ...result, message };
 }

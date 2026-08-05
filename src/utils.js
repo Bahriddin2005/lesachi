@@ -109,10 +109,18 @@ export function itemTotal(rental, item, now = new Date()) {
 }
 
 export function paidTotal(rental) {
+  return rentalItems(rental).reduce((total, item) => total + (item.paid ? frozenItemTotal(rental, item) : 0), 0);
+}
+
+export function returnedTotal(rental) {
   return rentalItems(rental).reduce((total, item) => total + frozenItemTotal(rental, item), 0);
 }
 
-export const frozenRentalTotal = paidTotal;
+export function pendingTotal(rental) {
+  return rentalItems(rental).reduce((total, item) => total + (!item.paid ? frozenItemTotal(rental, item) : 0), 0);
+}
+
+export const frozenRentalTotal = returnedTotal;
 
 export function currentDebtTotal(rental, now = new Date()) {
   return rentalItems(rental).reduce((total, item) => total + currentItemTotal(rental, item, now), 0);
@@ -124,7 +132,7 @@ export const currentRentalTotal = currentDebtTotal;
 export const openRentalTotal = currentDebtTotal;
 
 export function rentalTotal(rental, now = new Date()) {
-  return paidTotal(rental) + currentDebtTotal(rental, now);
+  return returnedTotal(rental) + currentDebtTotal(rental, now);
 }
 
 export function isClosed(rental) {
@@ -329,7 +337,7 @@ function receiptHeading(type) {
 }
 
 function lineText(line, status) {
-  const label = status === 'returned' ? 'TO‘LANDI' : 'JORIY QARZ';
+  const label = status === 'returned' ? (line.paid ? 'TO‘LANDI' : 'TO‘LOV KUTILMOQDA') : 'JORIY QARZ';
   const growth = status === 'returned' ? '' : ' · o‘sishda davom etadi';
   return `${label} — ${line.name}: ${line.quantity} dona × ${formatMoney(line.dailyPrice)} × ${line.days} kun = ${formatMoney(line.amount)}${growth}`;
 }
@@ -353,14 +361,20 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
   ];
 
   if (type === 'final') {
-    lines.push('QAYTARILGAN ANJOMLAR — TO‘LANDI');
-    lines.push(...returnedItems.map((item) => lineText(item, 'returned')));
-    lines.push('', `YAKUNIY TO‘LIQ SUMMA: ${formatMoney(finalTotal)}`);
+    if (returnedItems.some((item) => item.paid)) lines.push('QAYTARILGAN ANJOMLAR — TO‘LANDI');
+    lines.push(...returnedItems.filter((item) => item.paid).map((item) => lineText(item, 'returned')));
+    if (returnedItems.some((item) => !item.paid)) {
+      lines.push('', 'BUYUM QAYTDI — TO‘LOV KUTILMOQDA');
+      lines.push(...returnedItems.filter((item) => !item.paid).map((item) => lineText(item, 'returned')));
+      lines.push('', `TO‘LOV KUTILMOQDA: ${formatMoney(returnedItems.filter((item) => !item.paid).reduce((sum, item) => sum + item.amount, 0))}`);
+    } else {
+      lines.push('', `YAKUNIY TO‘LIQ SUMMA: ${formatMoney(finalTotal)}`);
+    }
   } else if (type === 'edit') {
     if (returnedItems.length) {
       lines.push('QAYTARILGAN ANJOMLAR — TO‘LANDI');
       lines.push(...returnedItems.map((item) => lineText(item, 'returned')));
-      lines.push('', `QABUL QILINGAN TO‘LOV: ${formatMoney(returnedTotal)}`);
+      lines.push('', `${returnedItems.every((item) => item.paid) ? 'TO‘LANGAN QISM' : 'TO‘LOV KUTILMOQDA'}: ${formatMoney(returnedTotal)}`);
     }
     if (addedItems.length) {
       lines.push('', 'QO‘SHIMCHA OLINGAN ANJOMLAR — JORIY QARZ');
@@ -372,7 +386,7 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
       lines.push(`JORIY QARZ: ${formatMoney(currentDebt)}`);
     }
   } else if (type === 'partial') {
-    lines.push('QAYTARILGAN QISM — TO‘LANDI');
+    lines.push('QAYTARILGAN QISM');
     lines.push(...(returnedItems.length ? returnedItems.map((item) => lineText(item, 'returned')) : ['Qaytarilgan anjom topilmadi.']));
     lines.push('', `QABUL QILINGAN TO‘LOV: ${formatMoney(returnedTotal)}`);
     if (openItems.length) {
@@ -450,14 +464,15 @@ function rowsHtml(lines, status) {
   if (!lines.length) return '<tr><td colspan="4" class="empty">Ma’lumot yo‘q</td></tr>';
   return lines.map((item) => {
     const isReturned = status === 'returned';
+    const isPaid = isReturned && item.paid === true;
     const detail = isReturned
-      ? `✓ TO‘LANDI · ${item.days} kun · ${formatDate(item.returnedAt, true)}`
+      ? `${isPaid ? '✓ TO‘LANDI' : '◷ TO‘LOV KUTILMOQDA'} · ${item.days} kun · ${formatDate(item.returnedAt, true)}`
       : `JORIY QARZ · ${item.days} kun · o‘sishda davom etadi`;
     return `<tr>
       <td><strong>${escapeHtml(item.name)}</strong><small class="${isReturned ? 'paid-note' : 'open-note'}">${escapeHtml(detail)}</small></td>
       <td>${escapeHtml(`${item.quantity} dona`)}</td>
       <td>${escapeHtml(formatMoney(item.dailyPrice))}</td>
-      <td class="amount ${isReturned ? 'paid-amount' : 'open-amount'}">${escapeHtml(formatMoney(item.amount))}</td>
+      <td class="amount ${isPaid ? 'paid-amount' : isReturned ? 'pending-amount' : 'open-amount'}">${escapeHtml(formatMoney(item.amount))}</td>
     </tr>`;
   }).join('');
 }
@@ -480,20 +495,28 @@ export function receiptHtml(rentalOrReceipt, receiptContext = {}) {
   const breakdown = receiptBreakdown(rentalOrReceipt, receiptContext);
   const { rental, type, returnedItems, addedItems, openItems, otherOpenItems, returnedTotal, currentDebt, finalTotal, remainingQuantity } = breakdown;
   const id = String(rental.id || 'CHEK').slice(-8).toUpperCase();
+  const paidReturnedItems = returnedItems.filter((item) => item.paid);
+  const pendingReturnedItems = returnedItems.filter((item) => !item.paid);
+  const paidReturnedTotal = sumLines(paidReturnedItems);
+  const pendingReturnedTotal = sumLines(pendingReturnedItems);
   let body = '';
 
   if (type === 'final') {
-    body = `${sectionHtml('Qaytarilgan anjomlar — TO‘LANDI', returnedItems, 'returned')}
-      ${summaryHtml('YAKUNIY TO‘LIQ SUMMA', finalTotal, 'paid')}`;
+    body = `${paidReturnedItems.length ? sectionHtml('Qaytarilgan anjomlar — TO‘LANDI', paidReturnedItems, 'returned') : ''}
+      ${pendingReturnedItems.length ? sectionHtml('Buyum qaytdi — TO‘LOV KUTILMOQDA', pendingReturnedItems, 'returned') : ''}
+      ${paidReturnedItems.length ? summaryHtml('TO‘LANGAN SUMMA', paidReturnedTotal, 'paid') : ''}
+      ${pendingReturnedItems.length ? summaryHtml('TO‘LOV KUTILMOQDA', pendingReturnedTotal, 'current') : ''}
+      ${!pendingReturnedItems.length ? summaryHtml('YAKUNIY TO‘LIQ SUMMA', finalTotal, 'paid') : ''}`;
   } else if (type === 'edit') {
-    body = `${returnedItems.length ? `${sectionHtml('Qaytarilgan anjomlar — TO‘LANDI', returnedItems, 'returned')}
-      ${summaryHtml('QABUL QILINGAN TO‘LOV', returnedTotal, 'paid')}` : ''}
+    body = `${returnedItems.length ? `${sectionHtml('Qaytarilgan anjomlar', returnedItems, 'returned')}
+      ${pendingReturnedItems.length ? summaryHtml('TO‘LOV KUTILMOQDA', pendingReturnedTotal, 'current') : summaryHtml('QAYTARILGAN SUMMA', returnedTotal, 'paid')}` : ''}
       ${addedItems.length ? sectionHtml('Qo‘shimcha olingan anjomlar — JORIY QARZ', addedItems, 'open') : ''}
       ${otherOpenItems.length ? `${sectionHtml('Hali mijozda — JORIY QARZ', otherOpenItems, 'open')}
       ${summaryHtml('JORIY QARZ', currentDebt, 'current', 'Bu summa o‘sishda davom etadi.')}` : ''}`;
   } else if (type === 'partial') {
-    body = `${sectionHtml('Qaytarilgan qism — TO‘LANDI', returnedItems, 'returned')}
-      ${summaryHtml('QABUL QILINGAN TO‘LOV', returnedTotal, 'paid')}
+    body = `${sectionHtml('Qaytarilgan qism', returnedItems, 'returned')}
+      ${paidReturnedItems.length ? summaryHtml('TO‘LANGAN QISM', paidReturnedTotal, 'paid') : ''}
+      ${pendingReturnedItems.length ? summaryHtml('TO‘LOV KUTILMOQDA', pendingReturnedTotal, 'current') : ''}
       ${openItems.length ? `${sectionHtml('Hali mijozda — JORIY QARZ', openItems, 'open')}
         ${summaryHtml('JORIY QARZ', currentDebt, 'current', 'Bu summa chekdagi to‘lovga qo‘shilmagan.')}
         <p class="note">Eslatma: Qolgan ${escapeHtml(remainingQuantity)} dona anjom qaytarilmaguncha, kunlik hisob davom etadi.</p>` : ''}`;

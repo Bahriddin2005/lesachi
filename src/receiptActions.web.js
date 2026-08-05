@@ -42,6 +42,12 @@ export async function sendReceiptSms(rentalOrReceipt, receiptContext) {
   const { rental } = resolveReceipt(rentalOrReceipt, receiptContext);
   const phone = rental.phone.replace(/[^+\d]/g, '');
   const message = receiptSmsText(rentalOrReceipt, receiptContext);
-  window.location.href = `sms:${phone}?body=${encodeURIComponent(message)}`;
+  return sendSmsMessage(phone, message);
+}
+
+export async function sendSmsMessage(phone, message) {
+  const normalizedPhone = String(phone || '').replace(/[^+\d]/g, '');
+  if (!normalizedPhone) throw new Error('Telefon raqami topilmadi.');
+  window.location.href = `sms:${normalizedPhone}?body=${encodeURIComponent(message)}`;
   return { result: 'unknown', message };
 }

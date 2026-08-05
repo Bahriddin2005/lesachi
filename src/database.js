@@ -33,6 +33,7 @@ function toRentalItem(row) {
     status,
     returnedAt: row.returnedAt || null,
     frozenAmount: numberOrNull(row.frozenAmount),
+    paid: Boolean(row.paid),
   };
 
   // Kept for callers from the first app version. New UI should use status,
@@ -127,6 +128,7 @@ async function ensureRentalItemColumns(db) {
     ['status', "TEXT NOT NULL DEFAULT 'open'"],
     ['returned_at', 'TEXT'],
     ['frozen_amount', 'INTEGER'],
+    ['paid', 'INTEGER NOT NULL DEFAULT 0'],
   ];
   for (const [name, definition] of missing) {
     if (!names.has(name)) {
@@ -267,7 +269,8 @@ async function fetchOpenItemsForRental(db, rentalId) {
       COALESCE(ri.started_at, r.started_at) AS startedAt,
       ri.status,
       ri.returned_at AS returnedAt,
-      ri.frozen_amount AS frozenAmount
+      ri.frozen_amount AS frozenAmount,
+      ri.paid
     FROM rental_items ri
     JOIN rentals r ON r.id = ri.rental_id
     WHERE ri.rental_id = ?
@@ -317,6 +320,7 @@ export async function migrateDatabase(db) {
       status TEXT NOT NULL DEFAULT 'open',
       returned_at TEXT,
       frozen_amount INTEGER,
+      paid INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (rental_id) REFERENCES rentals(id) ON DELETE CASCADE,
       FOREIGN KEY (equipment_type_id) REFERENCES equipment_types(id)
     );
@@ -342,6 +346,18 @@ export async function migrateDatabase(db) {
       message TEXT NOT NULL,
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      FOREIGN KEY (rental_id) REFERENCES rentals(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS sms_queue (
+      id TEXT PRIMARY KEY NOT NULL,
+      rental_id TEXT,
+      customer_phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      sent_at TEXT,
       FOREIGN KEY (rental_id) REFERENCES rentals(id) ON DELETE CASCADE
     );
 
@@ -502,7 +518,8 @@ export async function fetchRentals(db) {
       COALESCE(ri.started_at, r.started_at) AS startedAt,
       ri.status,
       ri.returned_at AS returnedAt,
-      ri.frozen_amount AS frozenAmount
+      ri.frozen_amount AS frozenAmount,
+      ri.paid
     FROM rental_items ri
     JOIN rentals r ON r.id = ri.rental_id
     WHERE ri.quantity > 0
@@ -553,7 +570,8 @@ export async function createRental(db, payload) {
       INSERT INTO rental_items (
         id, rental_id, equipment_type_id, name, quantity, daily_price,
         started_at, status, returned_at, frozen_amount
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+        , paid
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
     `, [
       createId('item'),
       rentalId,
@@ -692,8 +710,8 @@ export async function editRental(db, rentalId, changes = {}) {
         await tx.runAsync(`
           INSERT INTO rental_items (
             id, rental_id, equipment_type_id, name, quantity, daily_price,
-            started_at, status, returned_at, frozen_amount
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+        started_at, status, returned_at, frozen_amount, paid
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
         `, [createId('item'), rentalId, source.equipmentTypeId, source.name, remainingQuantity, source.dailyPrice, startedAt, ITEM_STATUS.OPEN]);
       }
     }
@@ -743,6 +761,17 @@ export async function editRental(db, rentalId, changes = {}) {
       remainingItemIds: remainingRows.map((item) => item.id),
     },
   };
+}
+
+export async function markRentalItemPaid(db, itemId) {
+  return withWriteTransaction(db, async (tx) => {
+    const item = await tx.getFirstAsync('SELECT id, status FROM rental_items WHERE id = ?', [itemId]);
+    if (!item || item.status !== ITEM_STATUS.RETURNED) {
+      throw new Error('Faqat qaytarilgan anjom uchun to‘lovni tasdiqlash mumkin.');
+    }
+    await tx.runAsync('UPDATE rental_items SET paid = 1 WHERE id = ?', [itemId]);
+    return itemId;
+  });
 }
 
 /**
@@ -890,4 +919,24 @@ export async function logSentMessage(db, rentalId, channel, message, status = 's
     'INSERT INTO sent_messages (id, rental_id, channel, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     [createId('message'), rentalId, channel, message, status, new Date().toISOString()],
   );
+}
+
+export async function queueSms(db, payload) {
+  const id = createId('sms');
+  await db.runAsync(
+    'INSERT INTO sms_queue (id, rental_id, customer_phone, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, payload.rentalId || null, payload.phone, payload.message, 'pending', new Date().toISOString()],
+  );
+  return id;
+}
+
+export async function fetchSmsQueue(db) {
+  const rows = await db.getAllAsync('SELECT id, rental_id AS rentalId, customer_phone AS phone, message, status, error_message AS errorMessage, created_at AS createdAt, sent_at AS sentAt FROM sms_queue ORDER BY created_at DESC');
+  return rows;
+}
+
+export async function updateSmsQueue(db, id, status, errorMessage = null) {
+  const sentAt = status === 'sent' ? new Date().toISOString() : null;
+  await db.runAsync('UPDATE sms_queue SET status = ?, error_message = ?, sent_at = ? WHERE id = ?', [status, errorMessage, sentAt, id]);
+  return id;
 }
