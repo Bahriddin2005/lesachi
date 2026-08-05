@@ -1176,7 +1176,7 @@ function Empty({ title, text, action, onPress }) {
 }
 
 function NewRentalModal({ open, equipment, onClose, onSubmit }) {
-  const blank = () => ({ key: `${Date.now()}_${Math.random()}`, name: '', quantity: '1', dailyPrice: '' });
+  const blank = () => ({ key: `${Date.now()}_${Math.random()}`, name: '', quantity: '0', dailyPrice: '' });
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [items, setItems] = useState([blank()]);
