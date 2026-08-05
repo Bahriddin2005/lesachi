@@ -90,8 +90,16 @@ const headTags = `
 const serviceWorkerRegistration = `
   <script>
     if ('serviceWorker' in navigator) {
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+      });
       window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js?v=11').catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=12')
+          .then((registration) => registration.update())
+          .catch(() => {});
       });
     }
   </script>`;
@@ -102,7 +110,7 @@ if (!indexHtml.includes('rel="manifest"')) {
 if (!indexHtml.includes('serviceWorker.register')) {
   indexHtml = indexHtml.replace('</body>', `${serviceWorkerRegistration}\n</body>`);
 }
-indexHtml = indexHtml.replace(/navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g, "navigator.serviceWorker.register('./sw.js?v=11')");
+indexHtml = indexHtml.replace(/navigator\.serviceWorker\.register\('\.\/sw\.js\?v=\d+'\)/g, "navigator.serviceWorker.register('./sw.js?v=12')");
 
 writeFileSync(indexPath, indexHtml);
 console.log(`PWA build tayyor: ${outputDir}`);
