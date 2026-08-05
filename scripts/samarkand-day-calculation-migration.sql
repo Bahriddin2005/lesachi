@@ -1,6 +1,6 @@
 -- Freeze returned rental amounts by Uzbekistan's business date (UTC+5), not
--- by the database server's session timezone. The calculation stays inclusive:
--- taking and returning an item on the same date is one billable day.
+-- by the database server's session timezone. Hours/minutes/seconds do not
+-- affect the difference; the same date is billed as the minimum one day.
 create or replace function public.register_rental_return(
   p_rental_id text,
   p_requests jsonb,
@@ -53,7 +53,7 @@ begin
     started_at_value := source_item.started_at;
     frozen_amount_value := greatest(1,
       ((p_returned_at at time zone 'Asia/Samarkand')::date
-        - (started_at_value at time zone 'Asia/Samarkand')::date) + 1
+        - (started_at_value at time zone 'Asia/Samarkand')::date)
     ) * source_item.daily_price * requested_quantity;
     remaining_quantity := source_item.quantity - requested_quantity;
 

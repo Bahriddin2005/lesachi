@@ -10,8 +10,8 @@ export function dayCount(from, to = new Date()) {
   const end = new Date(to);
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return 1;
   // Uzbekistan has a fixed UTC+5 business day. Converting timestamps to a
-  // civil-day serial avoids DST/device-timezone errors and keeps the inclusive
-  // "olgan kun + qaytargan/bungi kun" rule identical on every device.
+  // civil-day serial removes hours/minutes/seconds from the calculation. A
+  // zero date difference is still billed as the minimum one rental day.
   const civilDay = (date) => {
     const shifted = new Date(date.getTime() + BUSINESS_UTC_OFFSET_MS);
     return Math.floor(Date.UTC(
@@ -20,7 +20,7 @@ export function dayCount(from, to = new Date()) {
       shifted.getUTCDate(),
     ) / DAY_MS);
   };
-  return Math.max(1, civilDay(end) - civilDay(start) + 1);
+  return Math.max(1, civilDay(end) - civilDay(start));
 }
 
 function numberValue(value) {
