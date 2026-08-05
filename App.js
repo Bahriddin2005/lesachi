@@ -873,9 +873,14 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   const submit = async () => {
     const invalidReturn = activeItems.find((item) => Number(returnQuantities[item.id] || 0) > Number(item.quantity));
     if (invalidReturn) return Alert.alert('Son noto‘g‘ri', `${invalidReturn.name} uchun 0 dan ${invalidReturn.quantity} tagacha son kiriting.`);
-    const invalidAdd = (equipment || []).find((item) => Number(addQuantities[item.id] || 0) > Number(item.availableQuantity || 0));
-    if (invalidAdd) return Alert.alert('Omborda yetarli emas', `${invalidAdd.name} uchun omborda faqat ${invalidAdd.availableQuantity} dona mavjud.`);
     const returns = activeItems.map((item) => ({ itemId: item.id, quantity: Number(returnQuantities[item.id] || 0) })).filter((entry) => entry.quantity > 0);
+    const releasedByType = activeItems.reduce((map, item) => {
+      const returned = Number(returnQuantities[item.id] || 0);
+      if (returned && item.equipmentTypeId) map[item.equipmentTypeId] = (map[item.equipmentTypeId] || 0) + returned;
+      return map;
+    }, {});
+    const invalidAdd = (equipment || []).find((item) => Number(addQuantities[item.id] || 0) > Number(item.availableQuantity || 0) + Number(releasedByType[item.id] || 0));
+    if (invalidAdd) return Alert.alert('Omborda yetarli emas', `${invalidAdd.name} uchun omborda faqat ${Number(invalidAdd.availableQuantity || 0) + Number(releasedByType[invalidAdd.id] || 0)} dona mavjud.`);
     const additions = (equipment || []).map((item) => ({
       equipmentTypeId: item.id,
       name: item.name,
