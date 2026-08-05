@@ -335,6 +335,28 @@ export async function editRental(rentalId, changes = {}) {
   };
 }
 
+export async function editRentalRecord(rentalId, items, actor = 'Admin') {
+  if (!Array.isArray(items) || !items.length) throw new Error('Tahrirlanadigan anjom topilmadi.');
+  const payload = items.map((entry) => {
+    const id = String(entry?.id || '').trim();
+    const equipmentTypeId = String(entry?.equipmentTypeId || '').trim();
+    const quantity = Number(entry?.quantity);
+    const dailyPrice = Number(entry?.dailyPrice);
+    const startedAt = new Date(entry?.startedAt);
+    if (!id || !equipmentTypeId) throw new Error('Anjom turi topilmadi.');
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error('Anjom sonini 1 yoki undan katta kiriting.');
+    if (!Number.isSafeInteger(dailyPrice) || dailyPrice < 0) throw new Error('Kunlik narxni to‘g‘ri kiriting.');
+    if (Number.isNaN(startedAt.getTime())) throw new Error('Olingan sanani to‘g‘ri kiriting.');
+    return { id, equipmentTypeId, quantity, dailyPrice, startedAt: startedAt.toISOString() };
+  });
+  return unwrap(requireClient().rpc('edit_rental_record', {
+    p_rental_id: rentalId,
+    p_items: payload,
+    p_actor: actor || 'Admin',
+    p_changed_at: new Date().toISOString(),
+  }));
+}
+
 export async function markRentalItemPaid(itemId) {
   await unwrap(requireClient().rpc('mark_rental_item_paid', { p_item_id: itemId }));
   return itemId;

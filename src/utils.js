@@ -469,6 +469,11 @@ export function receiptText(rentalOrReceipt, receiptContext = {}) {
           ? event.details.items.map((item) => `${item.quantity} ta ${item.name}`).join(', ')
           : `${event.quantity || 0} ta anjom`;
         lines.push(`${formatDate(event.createdAt, true)} · QAYTARILDI: ${names} · ${actor}`);
+      } else if (event.type === 'edit') {
+        const changes = Array.isArray(event.details?.after)
+          ? event.details.after.map((item) => `${item.quantity} ta ${item.name}, ${formatMoney(item.dailyPrice)}/kun, ${formatDate(item.startedAt)}`).join('; ')
+          : 'Ijara ma’lumotlari yangilandi';
+        lines.push(`${formatDate(event.createdAt, true)} · TAHRIRLANDI: ${changes} · ${actor}`);
       }
     }
   }
@@ -561,7 +566,9 @@ function activityHtml(activity) {
     const actor = event.actor || 'Admin';
     const description = event.type === 'payment'
       ? `To‘lov qabul qilindi — ${formatMoney(event.amount)}`
-      : `Qaytarildi — ${Array.isArray(event.details?.items) ? event.details.items.map((item) => `${item.quantity} ta ${item.name}`).join(', ') : `${event.quantity || 0} ta anjom`}`;
+      : event.type === 'edit'
+        ? `Tahrirlandi — ${Array.isArray(event.details?.after) ? event.details.after.map((item) => `${item.quantity} ta ${item.name}, ${formatMoney(item.dailyPrice)}/kun, ${formatDate(item.startedAt)}`).join('; ') : 'ijara ma’lumotlari yangilandi'}`
+        : `Qaytarildi — ${Array.isArray(event.details?.items) ? event.details.items.map((item) => `${item.quantity} ta ${item.name}`).join(', ') : `${event.quantity || 0} ta anjom`}`;
     return `<tr><td>${escapeHtml(formatDate(event.createdAt, true))}</td><td>${escapeHtml(description)}</td><td>${escapeHtml(actor)}</td></tr>`;
   }).join('');
   return `<section class="section activity"><h2>AMALLAR TARIXI</h2><table><thead><tr><th>SANA</th><th>AMAL</th><th>KIM</th></tr></thead><tbody>${rows}</tbody></table></section>`;

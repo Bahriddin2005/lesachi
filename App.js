@@ -25,6 +25,7 @@ import {
   createEquipmentType,
   createRental,
   editRental,
+  editRentalRecord,
   deleteEquipmentType,
   fetchEquipmentTypes,
   fetchSmsQueue,
@@ -317,6 +318,19 @@ function LesaApp({ db }) {
     }
   };
 
+  const submitReceiptRecordEdit = async (rental, items) => {
+    try {
+      const event = await editRentalRecord(db, rental.id, items, 'Admin');
+      const rows = await load(true);
+      const updated = rows.find((row) => row.id === rental.id);
+      if (!updated) throw new Error('Yangilangan ijara topilmadi.');
+      setReceipt({ rental: updated, context: { type: isClosed(updated) ? 'final' : 'current' } });
+      return { ok: true, rental: updated, event };
+    } catch (error) {
+      return { ok: false, error: error.message || 'Ijara ma’lumotlarini saqlab bo‘lmadi.' };
+    }
+  };
+
   const confirmPaid = async (itemId) => {
     try {
       await markRentalItemPaid(db, itemId);
@@ -557,6 +571,8 @@ function LesaApp({ db }) {
         onShare={shareReceipt}
         onReturn={submitReceiptReturn}
         onPayment={submitReceiptPayment}
+        onRecordEdit={submitReceiptRecordEdit}
+        equipment={equipment}
       />
     </SafeAreaView>
   );
@@ -607,6 +623,20 @@ function quantityOf(items) {
 
 function lineAmount(rental, item) {
   return Number(item.amount ?? item.frozenAmount ?? itemTotal(rental, item));
+}
+
+function activityTitle(event, uppercase = false) {
+  let title;
+  if (event.type === 'payment') title = `To‘lov · ${formatMoney(event.amount)}`;
+  else if (event.type === 'edit') title = `Tahrirlandi · ${(event.details?.after || []).length || 1} ta qator`;
+  else title = `Qaytarildi · ${event.quantity} dona`;
+  return uppercase ? title.toUpperCase() : title;
+}
+
+function activityIcon(event) {
+  if (event.type === 'payment') return { name: 'cash-check', color: C.successDark, style: s.activityIconPayment };
+  if (event.type === 'edit') return { name: 'pencil-outline', color: C.green2, style: s.activityIconEdit };
+  return { name: 'package-down', color: C.orange, style: s.activityIconReturn };
 }
 
 function statusTone(days) {
@@ -1239,10 +1269,13 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
 
     {activity.length > 0 && <>
       <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>Amallar tarixi</Text><Text style={s.detailSectionCount}>{activity.length} ta amal</Text></View>
-      <View style={s.activityCard}>{activity.map((event) => <View key={event.id} style={s.activityRow}>
-        <View style={[s.activityIcon, event.type === 'payment' ? s.activityIconPayment : s.activityIconReturn]}><MaterialCommunityIcons name={event.type === 'payment' ? 'cash-check' : 'package-down'} size={23} color={event.type === 'payment' ? C.successDark : C.orange} /></View>
-        <View style={s.flex}><Text style={s.activityTitle}>{event.type === 'payment' ? `To‘lov: ${formatMoney(event.amount)}` : `Qaytarildi: ${event.quantity} dona`}</Text><Text style={s.activityMeta}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>
-      </View>)}</View>
+      <View style={s.activityCard}>{activity.map((event) => {
+        const icon = activityIcon(event);
+        return <View key={event.id} style={s.activityRow}>
+          <View style={[s.activityIcon, icon.style]}><MaterialCommunityIcons name={icon.name} size={23} color={icon.color} /></View>
+          <View style={s.flex}><Text style={s.activityTitle}>{activityTitle(event)}</Text><Text style={s.activityMeta}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>
+        </View>;
+      })}</View>
     </>}
 
     <Pressable style={s.returnButton} onPress={onEdit}><Text style={s.returnButtonText}>Tahrirlash</Text></Pressable>
@@ -1386,10 +1419,11 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   </>}</KeyboardAvoidingView></View></Modal>;
 }
 
-function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, onShare, onReturn, onPayment }) {
+function ReceiptModal({ receipt, channel, equipment, onClose, onDownload, onPrint, onSms, onShare, onReturn, onPayment, onRecordEdit }) {
   const [busy, setBusy] = useState(null);
   const [returnOpen, setReturnOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
+  const [recordEditOpen, setRecordEditOpen] = useState(false);
   const rental = receipt?.rental;
   const context = receipt?.context || { type: 'current' };
   const breakdown = rental ? receiptBreakdown(rental, context) : null;
@@ -1444,15 +1478,16 @@ function ReceiptModal({ receipt, channel, onClose, onDownload, onPrint, onSms, o
       {!isPartial && !isFinal && <View style={s.receiptGrand}><Text style={s.receiptGrandLabel}>JORIY QARZ</Text><Text style={[s.receiptGrandValue, { color: C.redDark }]}>{formatMoney(current)}</Text></View>}
       {!isPartial && !isFinal && returned.length > 0 && <View style={[s.receiptGrand, { borderTopColor: allPending ? C.orange : C.success }]}><Text style={s.receiptGrandLabel}>{allPending ? allPaid > 0 ? 'QISMAN TO‘LANDI · QOLDI' : 'TO‘LOV KUTILMOQDA' : 'TO‘LANDI'}</Text><Text style={[s.receiptGrandValue, { color: allPending ? C.orange : C.successDark }]}>{formatMoney(allPending || allPaid)}</Text></View>}
 
-      {activity.length > 0 && <View style={s.receiptActivity}><Text style={s.receiptSectionTitle}>AMALLAR TARIXI</Text>{activity.map((event) => <View key={event.id} style={s.receiptActivityRow}><Text style={s.receiptActivityTitle}>{event.type === 'payment' ? `TO‘LOV · ${formatMoney(event.amount)}` : `QAYTARILDI · ${event.quantity} dona`}</Text><Text style={s.receiptItemSub}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>)}</View>}
+      {activity.length > 0 && <View style={s.receiptActivity}><Text style={s.receiptSectionTitle}>AMALLAR TARIXI</Text>{activity.map((event) => <View key={event.id} style={s.receiptActivityRow}><Text style={s.receiptActivityTitle}>{activityTitle(event, true)}</Text><Text style={s.receiptItemSub}>{formatDate(event.createdAt, true)} · {event.actor || 'Admin'}</Text></View>)}</View>}
     </View>
     <View style={s.receiptActionGrid}><ReceiptAction icon="↓" label="PDF yuklab olish" primary busy={busy === 'pdf'} disabled={Boolean(busy)} onPress={() => run('pdf', onDownload)} /><ReceiptAction icon="▣" label="Chop etish" busy={busy === 'print'} disabled={Boolean(busy)} onPress={() => run('print', onPrint)} /><ReceiptAction icon="✉" label="SMS yuborish" orange busy={busy === 'sms'} disabled={Boolean(busy)} onPress={() => run('sms', onSms)} /></View>
     <View style={s.receiptRecordGrid}>
       <Pressable disabled={Boolean(busy) || !returnableItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptReturnButton, (pressed || !returnableItems.length) && s.receiptRecordDisabled]} onPress={() => setReturnOpen(true)}><MaterialCommunityIcons name="package-down" size={27} color={C.pageInk} /><Text style={s.receiptReturnButtonText}>Qaytarildi</Text></Pressable>
       <Pressable disabled={Boolean(busy) || allPending <= 0} style={({ pressed }) => [s.receiptRecordButton, s.receiptPaidButton, (pressed || allPending <= 0) && s.receiptRecordDisabled]} onPress={() => setPaymentOpen(true)}><MaterialCommunityIcons name="cash-check" size={27} color={C.white} /><Text style={s.receiptPaidButtonText}>To‘landi</Text></Pressable>
+      <Pressable disabled={Boolean(busy) || !returnableItems.length} style={({ pressed }) => [s.receiptRecordButton, s.receiptEditButton, (pressed || !returnableItems.length) && s.receiptRecordDisabled]} onPress={() => setRecordEditOpen(true)}><MaterialCommunityIcons name="pencil-outline" size={27} color={C.white} /><Text style={s.receiptEditButtonText}>Tahrirlash</Text></Pressable>
     </View>
     <Text style={s.shareHint}>Birlamchi kanal: <Text style={{ fontWeight: '500', color: C.pageInk }}>{channel}</Text></Text><Pressable disabled={Boolean(busy)} style={s.shareButton} onPress={() => run('share', onShare)}><Text style={s.shareButtonText}>{busy === 'share' ? 'Tayyorlanmoqda...' : 'Boshqa ilovaga ulashish'}</Text></Pressable>
-  </ScrollView></SafeAreaView>}</Modal><ReturnReceiptModal open={returnOpen} rental={rental} onClose={() => setReturnOpen(false)} onSubmit={onReturn} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPayment} /></>;
+  </ScrollView></SafeAreaView>}</Modal><ReturnReceiptModal open={returnOpen} rental={rental} onClose={() => setReturnOpen(false)} onSubmit={onReturn} /><PaymentReceiptModal open={paymentOpen} rental={rental} onClose={() => setPaymentOpen(false)} onSubmit={onPayment} /><RentalRecordEditModal open={recordEditOpen} rental={rental} equipment={equipment} onClose={() => setRecordEditOpen(false)} onSubmit={onRecordEdit} /></>;
 }
 
 function ReturnReceiptModal({ open, rental, onClose, onSubmit }) {
@@ -1542,6 +1577,105 @@ function PaymentReceiptModal({ open, rental, onClose, onSubmit }) {
   </KeyboardAvoidingView></View></Modal>;
 }
 
+function dateInputValue(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function parseDateInput(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day, 0, 0, 0, 0);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+
+function RentalRecordEditModal({ open, rental, equipment, onClose, onSubmit }) {
+  const activeItems = rental ? openItems(rental) : [];
+  const returnedCount = rental ? returnedItems(rental).length : 0;
+  const [rows, setRows] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const signature = activeItems.map((item) => `${item.id}:${item.quantity}:${item.dailyPrice}:${item.startedAt}:${item.equipmentTypeId}`).join('|');
+
+  useEffect(() => {
+    if (!open) return;
+    setRows(activeItems.map((item) => ({
+      id: item.id,
+      originalStartedAt: item.startedAt || rental.startedAt,
+      equipmentTypeId: item.equipmentTypeId || '',
+      quantity: String(item.quantity),
+      dailyPrice: String(item.dailyPrice),
+      startedDate: dateInputValue(item.startedAt || rental.startedAt),
+    })));
+    setSaving(false);
+    setError('');
+  }, [open, rental?.id, signature]);
+
+  const updateRow = (id, changes) => {
+    setError('');
+    setRows((current) => current.map((row) => row.id === id ? { ...row, ...changes } : row));
+  };
+  const currentByType = activeItems.reduce((map, item) => {
+    if (item.equipmentTypeId) map[item.equipmentTypeId] = (map[item.equipmentTypeId] || 0) + Number(item.quantity || 0);
+    return map;
+  }, {});
+  const capacityFor = (type) => Math.max(Number(type.availableQuantity || 0) + Number(currentByType[type.id] || 0), Number(currentByType[type.id] || 0));
+
+  const submit = async () => {
+    if (saving) return;
+    const clean = [];
+    for (const row of rows) {
+      const quantity = Number(row.quantity);
+      const dailyPrice = Number(row.dailyPrice);
+      const selectedType = (equipment || []).find((item) => item.id === row.equipmentTypeId);
+      const parsedDate = parseDateInput(row.startedDate);
+      if (!selectedType) return setError('Har bir qatorda anjom turini tanlang.');
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) return setError(`${selectedType.name}: soni 1 yoki undan katta bo‘lishi kerak.`);
+      if (!Number.isSafeInteger(dailyPrice) || dailyPrice < 0) return setError(`${selectedType.name}: kunlik narxni to‘g‘ri kiriting.`);
+      if (!parsedDate) return setError(`${selectedType.name}: sanani YYYY-MM-DD ko‘rinishida kiriting.`);
+      if (parsedDate.getTime() > Date.now()) return setError(`${selectedType.name}: olingan sana kelajakda bo‘lishi mumkin emas.`);
+      const originalDate = dateInputValue(row.originalStartedAt);
+      clean.push({
+        id: row.id,
+        equipmentTypeId: row.equipmentTypeId,
+        quantity,
+        dailyPrice,
+        startedAt: row.startedDate === originalDate ? row.originalStartedAt : parsedDate.toISOString(),
+      });
+    }
+    setSaving(true);
+    setError('');
+    const result = await onSubmit(rental, clean);
+    setSaving(false);
+    if (result?.ok) onClose();
+    else setError(result?.error || 'O‘zgarishlarni saqlab bo‘lmadi.');
+  };
+
+  return <Modal visible={Boolean(open && rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.modalContent}>
+    <ModalHeader title="Ijarani tahrirlash" subtitle={`${rental.customerName} · joriy anjomlar`} onClose={onClose} />
+    <View style={s.editHistoryNotice}><MaterialCommunityIcons name="shield-check-outline" size={25} color={C.orange} /><Text style={s.editHistoryNoticeText}>Faqat hozir mijozdagi anjomlar tahrirlanadi. Qaytarilgan va to‘langan tarix o‘zgarmaydi{returnedCount ? ` (${returnedCount} ta tarixiy qator)` : ''}.</Text></View>
+    {rows.map((row, index) => {
+      const selectedType = (equipment || []).find((item) => item.id === row.equipmentTypeId);
+      return <View key={row.id} style={s.recordEditCard}>
+        <Text style={s.itemNumber}>ANJOM {index + 1}</Text>
+        <Text style={s.recordEditLabel}>ANJOM TURI</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.suggestions}>{(equipment || []).map((type) => <Pressable key={type.id} onPress={() => updateRow(row.id, { equipmentTypeId: type.id, dailyPrice: String(type.dailyPrice) })} style={[s.suggestion, row.equipmentTypeId === type.id && s.suggestionActive]}><Text style={[s.suggestionText, row.equipmentTypeId === type.id && s.suggestionTextActive]}>{type.name} · {capacityFor(type)} ta</Text></Pressable>)}</ScrollView>
+        {selectedType && <Text style={s.recordEditStock}>Ombor sig‘imi: bu ijara bilan birga {capacityFor(selectedType)} tagacha</Text>}
+        <View style={s.twoColumns}><Field style={s.flex} label="SONI"><TextInput style={s.input} value={row.quantity} onChangeText={(value) => updateRow(row.id, { quantity: value.replace(/[^0-9]/g, '') })} keyboardType="number-pad" selectTextOnFocus /></Field><Field style={s.flex} label="KUNLIK NARX"><TextInput style={s.input} value={row.dailyPrice} onChangeText={(value) => updateRow(row.id, { dailyPrice: value.replace(/[^0-9]/g, '') })} keyboardType="number-pad" selectTextOnFocus /></Field></View>
+        <Field label="OLINGAN SANA (YYYY-MM-DD)"><TextInput style={s.input} value={row.startedDate} onChangeText={(value) => updateRow(row.id, { startedDate: value.replace(/[^0-9-]/g, '').slice(0, 10) })} keyboardType="numbers-and-punctuation" placeholder="2026-08-05" placeholderTextColor="#9AA49F" /></Field>
+      </View>;
+    })}
+    {error ? <View style={s.editSaveError}><MaterialCommunityIcons name="alert-circle-outline" size={24} color={C.redDark} /><Text style={s.editSaveErrorText}>{error}</Text></View> : null}
+    <Pressable disabled={saving || !rows.length} style={[s.mainButton, (saving || !rows.length) && s.receiptRecordDisabled]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>O‘zgarishlarni saqlash</Text>}</Pressable>
+  </ScrollView></KeyboardAvoidingView></SafeAreaView>}</Modal>;
+}
+
 function ReceiptAction({ icon, label, onPress, primary, orange, busy, disabled }) {
   return <Pressable disabled={disabled} onPress={onPress} style={({ pressed }) => [s.receiptAction, primary && s.receiptActionPrimary, orange && s.receiptActionOrange, orange && { borderColor: C.blueLine, backgroundColor: C.blueSoft }, (pressed || disabled) && { opacity: .65 }]}>{busy ? <ActivityIndicator size="small" color={primary ? C.white : orange ? C.orange : C.green} /> : <Text style={[s.receiptActionIcon, primary && { color: C.white }, orange && { color: C.orange }]}>{icon}</Text>}<Text style={[s.receiptActionLabel, primary && { color: C.white }, orange && { color: C.orange }]}>{label}</Text></Pressable>;
 }
@@ -1584,9 +1718,10 @@ const s = StyleSheet.create({
   detailSummary: { backgroundColor: C.card, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, padding: 20, marginBottom: 18 }, detailLabel: { color: C.green2, fontSize: 20, letterSpacing: 1, fontWeight: '400' }, detailTotal: { color: C.green2, fontSize: 35.1, fontWeight: '500', marginTop: 6 }, detailDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 8 }, detailSectionHeader: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4, marginBottom: 1 }, detailSectionCount: { color: C.pageMuted, fontSize: 20, fontWeight: '400' }, paidSectionTotal: { color: C.pageAccent, fontSize: 20, fontWeight: '500' }, detailItem: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginTop: 8 }, detailItemTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, detailItemName: { color: C.ink, fontSize: 20, fontWeight: '500' }, detailItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, detailItemTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, returnButton: { borderRadius: 8, backgroundColor: C.green, alignItems: 'center', paddingVertical: 15, marginTop: 12 }, returnButtonText: { color: C.white, fontWeight: '500', fontSize: 20 }, returnHistoryItem: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 13, marginTop: 8 }, returnHistoryAmount: { color: C.green2, fontSize: 20, fontWeight: '400' }, paidBadge: { alignSelf: 'flex-start', borderRadius: 8, backgroundColor: C.greenSoft, paddingHorizontal: 8, paddingVertical: 4, marginTop: 9 }, paidBadgeText: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .4 }, receiptButton: { borderRadius: 8, borderWidth: 1, borderColor: C.pageAccent, alignItems: 'center', paddingVertical: 12, marginTop: 15 }, receiptButtonText: { color: C.pageAccent, fontWeight: '500', fontSize: 20 },
   overlay: { flex: 1, backgroundColor: 'rgba(17,24,39,.48)', justifyContent: 'flex-end' }, returnSheet: { maxHeight: '89%', backgroundColor: C.page, padding: 18, paddingBottom: Platform.OS === 'ios' ? 32 : 20, borderTopLeftRadius: 8, borderTopRightRadius: 8 }, returnHint: { fontSize: 20, lineHeight: 24, color: C.pageMuted, fontWeight: '400', marginBottom: 12 }, returnItemsScroll: { flexGrow: 0, marginBottom: 13 }, returnItemsList: { gap: 8 }, returnItemCard: { backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.line, padding: 16 }, returnItemHeading: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', marginBottom: 9 }, returnItemMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, returnMax: { color: C.green2, fontSize: 20, fontWeight: '400' },
   editSaveError: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, borderRadius: 12, padding: 12, marginBottom: 10 }, editSaveErrorText: { flex: 1, color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' },
-  activityCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, activityRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.line }, activityIcon: { width: 42, height: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, activityIconPayment: { backgroundColor: '#14351F' }, activityIconReturn: { backgroundColor: '#382E0B' }, activityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' }, activityMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 3 },
+  activityCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 14, marginTop: 8, marginBottom: 12 }, activityRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: C.line }, activityIcon: { width: 42, height: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }, activityIconPayment: { backgroundColor: '#14351F' }, activityIconReturn: { backgroundColor: '#382E0B' }, activityIconEdit: { backgroundColor: C.blueSoft }, activityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' }, activityMeta: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 3 },
   receiptActivity: { marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.line }, receiptActivityRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }, receiptActivityTitle: { color: C.ink, fontSize: 20, fontWeight: '500' },
-  receiptRecordGrid: { flexDirection: 'row', gap: 10, marginBottom: 14 }, receiptRecordButton: { flex: 1, minHeight: 62, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 10 }, receiptReturnButton: { backgroundColor: C.page, borderWidth: 1, borderColor: C.pageInk }, receiptReturnButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500' }, receiptRecordDisabled: { opacity: .45 },
+  receiptRecordGrid: { flexDirection: 'row', gap: 8, marginBottom: 14 }, receiptRecordButton: { flex: 1, minWidth: 0, minHeight: 78, borderRadius: 8, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4, paddingHorizontal: 4 }, receiptReturnButton: { backgroundColor: C.page, borderWidth: 1, borderColor: C.pageInk }, receiptReturnButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptPaidButton: { backgroundColor: C.success, borderWidth: 1, borderColor: C.success }, receiptPaidButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptEditButton: { backgroundColor: C.card, borderWidth: 1, borderColor: C.blueLine }, receiptEditButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, receiptRecordDisabled: { opacity: .45 },
+  editHistoryNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 8, borderWidth: 1, borderColor: C.orange, backgroundColor: C.card, padding: 14, marginBottom: 12 }, editHistoryNoticeText: { flex: 1, color: C.ink, fontSize: 20, lineHeight: 25, fontWeight: '400' }, recordEditCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 16, marginBottom: 10 }, recordEditLabel: { color: C.muted, fontSize: 20, fontWeight: '500', letterSpacing: .7, marginTop: 10 }, recordEditStock: { color: C.green2, fontSize: 20, lineHeight: 24, marginBottom: 8 },
   returnAllButton: { minHeight: 56, borderRadius: 8, backgroundColor: C.page, borderWidth: 1, borderColor: C.pageInk, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 12 }, returnAllButtonText: { color: C.pageInk, fontSize: 20, fontWeight: '500' },
   paymentEntryCard: { width: '100%', maxWidth: 470, backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.line, padding: 20 }, paymentEntryHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }, paymentEntryClose: { width: 42, height: 42, borderRadius: 8, backgroundColor: C.cardRaised, alignItems: 'center', justifyContent: 'center' }, paymentPendingBox: { backgroundColor: C.cardRaised, borderWidth: 1, borderColor: C.orange, borderRadius: 8, padding: 14, marginVertical: 16 }, paymentPendingLabel: { color: C.orange, fontSize: 20, fontWeight: '400' }, paymentPendingValue: { color: C.orange, fontSize: 26, fontWeight: '500', marginTop: 6 }, payAllButton: { minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: C.success, backgroundColor: '#14351F', alignItems: 'center', justifyContent: 'center', marginTop: -4 }, payAllButtonText: { color: C.successDark, fontSize: 20, fontWeight: '500' }, paymentHistoryHint: { color: C.muted, fontSize: 20, lineHeight: 25, marginTop: 12 },
   receiptPaper: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 8, padding: 18, marginBottom: 13 }, receiptHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderStyle: 'dashed', borderBottomColor: C.line }, receiptNumber: { color: C.muted, fontSize: 20, fontWeight: '400' }, receiptCustomer: { alignItems: 'center', paddingVertical: 17 }, receiptName: { color: C.ink, fontSize: 20, fontWeight: '500' }, receiptDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 7 }, receiptSectionTitle: { color: C.green2, fontSize: 20, letterSpacing: .8, fontWeight: '400', marginBottom: 2 }, receiptRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: 1, borderTopColor: C.line }, receiptItemName: { color: C.ink, fontSize: 20, fontWeight: '400' }, receiptItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, receiptPaidAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentBlock: { marginTop: 12, backgroundColor: C.cardRaised, borderRadius: 8, padding: 12, borderWidth: 1, borderColor: C.blueLine }, receiptCurrentTitle: { color: C.green2, fontSize: 20, letterSpacing: .45, fontWeight: '400', marginBottom: 7 }, receiptOpenRow: { paddingVertical: 8, borderTopWidth: 1, borderTopColor: C.line }, receiptOpenAmount: { color: C.green2, fontWeight: '400', fontSize: 20 }, receiptCurrentTotal: { color: C.green2, fontWeight: '500', fontSize: 20.8, textAlign: 'right', paddingTop: 8, marginTop: 4, borderTopWidth: 1, borderTopColor: C.blueLine }, receiptReminder: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 10 }, receiptGrand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 15, marginTop: 13, borderTopWidth: 1, borderTopColor: C.ink }, receiptGrandLabel: { color: C.ink, fontSize: 20, fontWeight: '500', maxWidth: '56%' }, receiptGrandValue: { color: C.green2, fontSize: 23.3, fontWeight: '500' }, receiptActionGrid: { flexDirection: 'row', gap: 8, marginBottom: 13 }, receiptAction: { flex: 1, minHeight: 78, paddingVertical: 11, paddingHorizontal: 8, borderWidth: 1, borderColor: C.blueLine, borderRadius: 8, alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: C.card }, receiptActionPrimary: { backgroundColor: C.green, borderColor: C.green }, receiptActionOrange: { borderColor: C.blueLine, backgroundColor: C.card }, receiptActionIcon: { color: C.green2, fontSize: 22.1, fontWeight: '400' }, receiptActionLabel: { color: C.green2, fontSize: 20, textAlign: 'center', fontWeight: '400' }, shareHint: { textAlign: 'center', color: C.pageMuted, fontSize: 20, fontWeight: '400', marginBottom: 10 }, shareButton: { minHeight: 44, borderRadius: 8, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card }, shareButtonText: { color: C.green2, fontSize: 20, fontWeight: '400' },

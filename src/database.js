@@ -852,6 +852,117 @@ export async function editRental(db, rentalId, changes = {}) {
   };
 }
 
+function normaliseRentalRecordItems(items) {
+  if (!Array.isArray(items) || !items.length) {
+    throw new Error('Tahrirlanadigan anjom topilmadi.');
+  }
+  const ids = new Set();
+  return items.map((entry) => {
+    const id = String(entry?.id || '').trim();
+    const equipmentTypeId = String(entry?.equipmentTypeId || '').trim();
+    const quantity = Number(entry?.quantity);
+    const dailyPrice = Number(entry?.dailyPrice);
+    const startedAt = new Date(entry?.startedAt);
+    if (!id || ids.has(id)) throw new Error('Anjom qatorlari takrorlangan yoki topilmadi.');
+    if (!equipmentTypeId) throw new Error('Anjom turini tanlang.');
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error('Anjom sonini 1 yoki undan katta kiriting.');
+    if (!Number.isSafeInteger(dailyPrice) || dailyPrice < 0) throw new Error('Kunlik narxni to‘g‘ri kiriting.');
+    if (Number.isNaN(startedAt.getTime())) throw new Error('Olingan sanani to‘g‘ri kiriting.');
+    ids.add(id);
+    return { id, equipmentTypeId, quantity, dailyPrice, startedAt: startedAt.toISOString() };
+  });
+}
+
+/** Atomically edits every currently open row and records one immutable audit event. */
+export async function editRentalRecord(db, rentalId, items, actor = 'Admin') {
+  const edits = normaliseRentalRecordItems(items);
+  const changedAt = new Date().toISOString();
+  return withWriteTransaction(db, async (tx) => {
+    const rental = await tx.getFirstAsync('SELECT id FROM rentals WHERE id = ?', [rentalId]);
+    if (!rental) throw new Error('Ijara topilmadi.');
+    const current = await tx.getAllAsync(`
+      SELECT id, equipment_type_id AS equipmentTypeId, name, quantity,
+             daily_price AS dailyPrice, started_at AS startedAt
+      FROM rental_items
+      WHERE rental_id = ? AND status = 'open' AND quantity > 0
+      ORDER BY id
+    `, [rentalId]);
+    if (!current.length) throw new Error('Qaytarilgan tarixni tahrirlab bo‘lmaydi. Ochiq anjom yo‘q.');
+    if (current.length !== edits.length) throw new Error('Anjomlar ro‘yxati yangilangan. Oynani yopib, qayta oching.');
+    const currentById = new Map(current.map((item) => [item.id, item]));
+    for (const edit of edits) {
+      if (!currentById.has(edit.id)) throw new Error('Anjomlar ro‘yxati yangilangan. Oynani yopib, qayta oching.');
+    }
+
+    const desiredByType = edits.reduce((map, edit) => {
+      map.set(edit.equipmentTypeId, (map.get(edit.equipmentTypeId) || 0) + edit.quantity);
+      return map;
+    }, new Map());
+    const typeById = new Map();
+    for (const [equipmentTypeId, desired] of desiredByType) {
+      const type = await tx.getFirstAsync(
+        'SELECT id, name, total_quantity AS totalQuantity FROM equipment_types WHERE id = ?',
+        [equipmentTypeId],
+      );
+      if (!type) throw new Error('Tanlangan anjom omborda topilmadi.');
+      const otherUsage = await tx.getFirstAsync(`
+        SELECT COALESCE(SUM(ri.quantity), 0) AS rentedQuantity
+        FROM rental_items ri
+        JOIN rentals r ON r.id = ri.rental_id
+        WHERE ri.equipment_type_id = ? AND ri.rental_id <> ?
+          AND ri.status = 'open' AND ri.quantity > 0 AND r.status <> 'closed'
+      `, [equipmentTypeId, rentalId]);
+      const currentAllocation = current.reduce((sum, item) => (
+        item.equipmentTypeId === equipmentTypeId ? sum + Number(item.quantity || 0) : sum
+      ), 0);
+      const available = Math.max(currentAllocation, Number(type.totalQuantity || 0) - Number(otherUsage?.rentedQuantity || 0), 0);
+      if (desired > available) throw new Error(`${type.name}: omborda bu ijara uchun faqat ${available} dona mavjud.`);
+      typeById.set(type.id, type);
+    }
+
+    const before = current.map((item) => ({
+      id: item.id,
+      equipmentTypeId: item.equipmentTypeId,
+      name: item.name,
+      quantity: Number(item.quantity),
+      dailyPrice: Number(item.dailyPrice),
+      startedAt: item.startedAt,
+    }));
+    const after = edits.map((edit) => ({ ...edit, name: typeById.get(edit.equipmentTypeId).name }));
+    const changed = after.some((item) => {
+      const previous = currentById.get(item.id);
+      return previous.equipmentTypeId !== item.equipmentTypeId
+        || Number(previous.quantity) !== item.quantity
+        || Number(previous.dailyPrice) !== item.dailyPrice
+        || new Date(previous.startedAt).toISOString() !== item.startedAt;
+    });
+    if (!changed) throw new Error('Hech qanday o‘zgarish kiritilmadi.');
+
+    for (const item of after) {
+      await tx.runAsync(`
+        UPDATE rental_items
+        SET equipment_type_id = ?, name = ?, quantity = ?, daily_price = ?, started_at = ?
+        WHERE id = ? AND rental_id = ? AND status = 'open'
+      `, [item.equipmentTypeId, item.name, item.quantity, item.dailyPrice, item.startedAt, item.id, rentalId]);
+    }
+    await tx.runAsync(`
+      UPDATE rentals
+      SET started_at = COALESCE((SELECT MIN(started_at) FROM rental_items WHERE rental_id = ?), started_at),
+          status = 'active', closed_at = NULL
+      WHERE id = ?
+    `, [rentalId, rentalId]);
+    const event = await insertRentalEvent(tx, {
+      rentalId,
+      type: 'edit',
+      quantity: after.reduce((sum, item) => sum + item.quantity, 0),
+      details: { before, after },
+      actor,
+      createdAt: changedAt,
+    });
+    return { ...event, items: after };
+  });
+}
+
 export async function markRentalItemPaid(db, itemId) {
   return withWriteTransaction(db, async (tx) => {
     const item = await tx.getFirstAsync(`

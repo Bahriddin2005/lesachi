@@ -23,6 +23,11 @@ export function editRental(db, rentalId, changes) {
     ? remote.editRental(rentalId, changes)
     : local.editRental(db, rentalId, changes);
 }
+export function editRentalRecord(db, rentalId, items, actor = 'Admin') {
+  return usesRemoteDatabase
+    ? remote.editRentalRecord(rentalId, items, actor)
+    : local.editRentalRecord(db, rentalId, items, actor);
+}
 export function markRentalItemPaid(db, itemId) {
   return usesRemoteDatabase
     ? remote.markRentalItemPaid(itemId)

@@ -56,7 +56,7 @@ create table if not exists public.sent_messages (
 create table if not exists public.rental_events (
   id text primary key,
   rental_id text not null references public.rentals(id) on delete cascade,
-  event_type text not null check (event_type in ('return', 'payment')),
+  event_type text not null check (event_type in ('return', 'payment', 'edit')),
   quantity integer not null default 0,
   amount integer not null default 0,
   details jsonb not null default '{}'::jsonb,
@@ -511,5 +511,7 @@ values
   ('apk_url', '')
 on conflict (key) do nothing;
 
--- Apply the additive payment/history upgrade after this base schema when
--- provisioning an existing project: scripts/payment-history-migration.sql
+-- Apply the additive upgrades after this base schema when provisioning an
+-- existing project:
+--   scripts/payment-history-migration.sql
+--   scripts/edit-rental-record-migration.sql
