@@ -1195,51 +1195,98 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
 
 function RentalEditModal({ target, equipment, onClose, onSubmit }) {
   const activeItems = target ? openItems(target) : [];
-  const [returnQuantities, setReturnQuantities] = useState({});
-  const [addQuantities, setAddQuantities] = useState({});
+  const blankAddition = () => ({ key: `add_${Date.now()}_${Math.random()}`, equipmentTypeId: null, quantity: '1' });
+  const [remainingQuantities, setRemainingQuantities] = useState({});
+  const [additionRows, setAdditionRows] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   useEffect(() => {
     if (target) {
-      setReturnQuantities(Object.fromEntries(openItems(target).map((item) => [item.id, '0'])));
-      setAddQuantities(Object.fromEntries((equipment || []).map((item) => [item.id, '0'])));
+      setRemainingQuantities(Object.fromEntries(openItems(target).map((item) => [item.id, String(item.quantity)])));
+      setAdditionRows([]);
       setSaving(false);
       setSaveError('');
     }
   }, [target?.id]);
 
-  const updateReturnQuantity = (itemId, value) => {
+  const remainingFor = (item) => Number(remainingQuantities[item.id] ?? item.quantity ?? 0);
+  const returnedFor = (item) => Math.max(0, Number(item.quantity || 0) - remainingFor(item));
+  const releasedForEquipment = (equipmentTypeId) => activeItems.reduce((total, item) => (
+    item.equipmentTypeId === equipmentTypeId ? total + returnedFor(item) : total
+  ), 0);
+  const availableForEquipment = (item) => Number(item?.availableQuantity || 0) + releasedForEquipment(item?.id);
+
+  const updateRemainingQuantity = (itemId, value) => {
     setSaveError('');
-    setReturnQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+    setRemainingQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
   };
-  const updateAddQuantity = (itemId, value) => {
+  const updateAddition = (key, changes) => {
     setSaveError('');
-    setAddQuantities((values) => ({ ...values, [itemId]: value.replace(/[^0-9]/g, '') }));
+    setAdditionRows((rows) => rows.map((row) => row.key === key ? { ...row, ...changes } : row));
   };
-  const submit = async () => {
+  const removeAddition = (key) => {
     setSaveError('');
-    const invalidReturn = activeItems.find((item) => Number(returnQuantities[item.id] || 0) > Number(item.quantity));
-    if (invalidReturn) {
-      setSaveError(`${invalidReturn.name} uchun 0 dan ${invalidReturn.quantity} tagacha son kiriting.`);
+    setAdditionRows((rows) => rows.filter((row) => row.key !== key));
+  };
+
+  const selectedEquipmentIds = new Set(additionRows.map((row) => row.equipmentTypeId).filter(Boolean));
+  const availableUnselectedCount = (equipment || []).filter((item) => availableForEquipment(item) > 0 && !selectedEquipmentIds.has(item.id)).length;
+  const blankAdditionCount = additionRows.filter((row) => !row.equipmentTypeId).length;
+  const canAddMore = availableUnselectedCount > blankAdditionCount;
+  const addAddition = () => {
+    setSaveError('');
+    if (!canAddMore) {
+      setSaveError('Qo‘shish uchun omborda bo‘sh anjom yo‘q. Avval qaytgan anjom sonini kiriting yoki Omborda zaxirani oshiring.');
       return;
     }
-    const returns = activeItems.map((item) => ({ itemId: item.id, quantity: Number(returnQuantities[item.id] || 0) })).filter((entry) => entry.quantity > 0);
+    setAdditionRows((rows) => [...rows, blankAddition()]);
+  };
+
+  const submit = async () => {
+    setSaveError('');
+    const invalidRemaining = activeItems.find((item) => {
+      const remaining = remainingFor(item);
+      return !Number.isFinite(remaining) || remaining < 0 || remaining > Number(item.quantity || 0);
+    });
+    if (invalidRemaining) {
+      setSaveError(`${invalidRemaining.name} uchun mijozda qolgan son 0 dan ${invalidRemaining.quantity} tagacha bo‘lishi kerak.`);
+      return;
+    }
+    const returns = activeItems.map((item) => ({ itemId: item.id, quantity: returnedFor(item) })).filter((entry) => entry.quantity > 0);
     const releasedByType = activeItems.reduce((map, item) => {
-      const returned = Number(returnQuantities[item.id] || 0);
+      const returned = returnedFor(item);
       if (returned && item.equipmentTypeId) map[item.equipmentTypeId] = (map[item.equipmentTypeId] || 0) + returned;
       return map;
     }, {});
-    const invalidAdd = (equipment || []).find((item) => Number(addQuantities[item.id] || 0) > Number(item.availableQuantity || 0) + Number(releasedByType[item.id] || 0));
+
+    const missingEquipment = additionRows.find((row) => !row.equipmentTypeId);
+    if (missingEquipment) {
+      setSaveError('Qo‘shiladigan anjomni tanlang yoki bo‘sh qatorni o‘chiring.');
+      return;
+    }
+    const invalidQuantity = additionRows.find((row) => !Number.isFinite(Number(row.quantity)) || Number(row.quantity) < 1);
+    if (invalidQuantity) {
+      setSaveError('Qo‘shiladigan anjom sonini 1 yoki undan katta qilib kiriting.');
+      return;
+    }
+    const additions = additionRows.map((row) => {
+      const item = (equipment || []).find((entry) => entry.id === row.equipmentTypeId);
+      return item ? {
+        equipmentTypeId: item.id,
+        name: item.name,
+        dailyPrice: item.dailyPrice,
+        quantity: Number(row.quantity),
+      } : null;
+    }).filter(Boolean);
+    const additionTotals = additions.reduce((map, item) => {
+      map[item.equipmentTypeId] = (map[item.equipmentTypeId] || 0) + item.quantity;
+      return map;
+    }, {});
+    const invalidAdd = (equipment || []).find((item) => Number(additionTotals[item.id] || 0) > Number(item.availableQuantity || 0) + Number(releasedByType[item.id] || 0));
     if (invalidAdd) {
       setSaveError(`${invalidAdd.name} uchun omborda faqat ${Number(invalidAdd.availableQuantity || 0) + Number(releasedByType[invalidAdd.id] || 0)} dona mavjud.`);
       return;
     }
-    const additions = (equipment || []).map((item) => ({
-      equipmentTypeId: item.id,
-      name: item.name,
-      dailyPrice: item.dailyPrice,
-      quantity: Number(addQuantities[item.id] || 0),
-    })).filter((entry) => entry.quantity > 0);
     if (!returns.length && !additions.length) {
       onClose();
       return;
@@ -1258,19 +1305,24 @@ function RentalEditModal({ target, equipment, onClose, onSubmit }) {
     <ModalHeader title="Tahrirlash" subtitle={target.customerName} onClose={onClose} />
     <ScrollView style={s.returnItemsScroll} contentContainerStyle={s.returnItemsList} keyboardShouldPersistTaps="always">
       {activeItems.length > 0 && <>
-        <Text style={s.itemsTitle}>Qaytarilgan anjomlar</Text>
-        <Text style={s.returnHint}>Qaytgan miqdorni kiriting. Qolgan anjomlar mijozda qoladi va hisob davom etadi.</Text>
+        <Text style={s.itemsTitle}>Mijozdagi anjomlar</Text>
+        <Text style={s.returnHint}>Maydonda mijozdagi hozirgi son turadi. Anjom qaytsa, mijozda qolgan sonni yozing. Masalan, 4 tadan 1 ta qaytsa — 3 yozing.</Text>
         {activeItems.map((item) => <View key={item.id} style={s.returnItemCard}>
-          <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Mijozda hozir: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.quantity}</Text></View>
-          <Field label="NECHTA QAYTARDI?"><TextInput style={s.input} value={returnQuantities[item.id] ?? '0'} onChangeText={(value) => updateReturnQuantity(item.id, value)} keyboardType="number-pad" selectTextOnFocus placeholder="0" placeholderTextColor="#9AA49F" /></Field>
+          <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Olib ketgan: {item.quantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>Qaytgan: {returnedFor(item)} ta</Text></View>
+          <Field label="MIJOZDA QOLGAN SONI"><TextInput style={s.input} value={remainingQuantities[item.id] ?? String(item.quantity)} onChangeText={(value) => updateRemainingQuantity(item.id, value)} keyboardType="number-pad" selectTextOnFocus placeholder="0" placeholderTextColor="#9AA49F" /></Field>
         </View>)}
       </>}
-      <Text style={[s.itemsTitle, { marginTop: 14 }]}>Yana anjom olib ketdimi?</Text>
-      <Text style={s.returnHint}>Omborda mavjud anjomdan qo‘shimcha berilgan miqdorni kiriting. Bu anjom uchun hisob bugundan boshlanadi.</Text>
-      {(equipment || []).map((item) => <View key={item.id} style={s.returnItemCard}>
-        <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{item.name}</Text><Text style={s.returnItemMeta}>Omborda mavjud: {item.availableQuantity} ta · {formatMoney(item.dailyPrice)}/kun</Text></View><Text style={s.returnMax}>maks. {item.availableQuantity}</Text></View>
-        <Field label="QO‘SHILADIGAN SON"><TextInput style={s.input} value={addQuantities[item.id] ?? '0'} onChangeText={(value) => updateAddQuantity(item.id, value)} keyboardType="number-pad" selectTextOnFocus placeholder="0" placeholderTextColor="#9AA49F" /></Field>
-      </View>)}
+      {additionRows.length > 0 && <Text style={[s.itemsTitle, { marginTop: 14 }]}>Qo‘shiladigan anjomlar</Text>}
+      {additionRows.map((row) => {
+        const selected = (equipment || []).find((item) => item.id === row.equipmentTypeId);
+        const options = (equipment || []).filter((item) => availableForEquipment(item) > 0 && (item.id === row.equipmentTypeId || !selectedEquipmentIds.has(item.id)));
+        return <View key={row.key} style={s.returnItemCard}>
+          <View style={s.returnItemHeading}><View style={s.flex}><Text style={s.detailItemName}>{selected?.name || 'Anjomni tanlang'}</Text>{selected && <Text style={s.returnItemMeta}>Omborda mavjud: {availableForEquipment(selected)} ta · {formatMoney(selected.dailyPrice)}/kun</Text>}</View><Pressable onPress={() => removeAddition(row.key)}><Text style={s.removeText}>O‘chirish</Text></Pressable></View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.suggestions}>{options.map((item) => <Pressable key={item.id} onPress={() => updateAddition(row.key, { equipmentTypeId: item.id, quantity: '1' })} style={[s.suggestion, row.equipmentTypeId === item.id && s.suggestionActive]}><Text style={[s.suggestionText, row.equipmentTypeId === item.id && s.suggestionTextActive]}>{item.name} · {availableForEquipment(item)} ta</Text></Pressable>)}</ScrollView>
+          {selected ? <Field label="QO‘SHILADIGAN SON"><TextInput style={s.input} value={row.quantity} onChangeText={(value) => updateAddition(row.key, { quantity: value.replace(/[^0-9]/g, '') })} keyboardType="number-pad" selectTextOnFocus placeholder="1" placeholderTextColor="#9AA49F" /></Field> : <Text style={s.returnHint}>Yuqoridagi ro‘yxatdan anjomni tanlang.</Text>}
+        </View>;
+      })}
+      <Pressable style={s.addItem} onPress={addAddition}><Text style={s.addItemText}>＋ Yana anjom qo‘shish</Text></Pressable>
     </ScrollView>
     {saveError ? <View style={s.editSaveError}><MaterialCommunityIcons name="alert-circle-outline" size={24} color={C.redDark} /><Text style={s.editSaveErrorText}>{saveError}</Text></View> : null}
     <Pressable disabled={saving} style={[s.mainButton, saving && { opacity: .65 }]} onPress={submit}>{saving ? <ActivityIndicator color={C.white} /> : <Text style={s.mainButtonText}>Saqlash</Text>}</Pressable>
