@@ -119,6 +119,7 @@ function LesaApp({ db }) {
   const [isIosWeb, setIsIosWeb] = useState(false);
   const [splashReady, setSplashReady] = useState(false);
   const [smsSending, setSmsSending] = useState(null);
+  const [paymentsBackScreen, setPaymentsBackScreen] = useState('home');
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setRefreshing(true);
@@ -218,6 +219,8 @@ function LesaApp({ db }) {
 
   const active = useMemo(() => rentals.filter((rental) => !isClosed(rental)), [rentals]);
   const history = useMemo(() => rentals.filter(isClosed), [rentals]);
+  const pendingRentals = useMemo(() => rentals.filter((rental) => pendingPaymentItems(rental).length > 0), [rentals]);
+  const pendingPaymentCount = useMemo(() => pendingRentals.reduce((total, rental) => total + pendingPaymentItems(rental).length, 0), [pendingRentals]);
 
   const submitRental = async (payload) => {
     try {
@@ -271,11 +274,24 @@ function LesaApp({ db }) {
   const confirmPaid = async (itemId) => {
     try {
       await markRentalItemPaid(db, itemId);
-      const rows = await load(true);
-      if (selected) setSelected(rows.find((row) => row.id === selected.id) || selected);
+      const markPaid = (rental) => {
+        if (!rental?.items?.some((item) => item.id === itemId)) return rental;
+        return { ...rental, items: rental.items.map((item) => item.id === itemId ? { ...item, paid: true } : item) };
+      };
+      setRentals((rows) => rows.map(markPaid));
+      setSelected((current) => current ? markPaid(current) : current);
+      load(true).catch(() => {
+        // The payment is already saved. Keep the optimistic state until the next refresh.
+      });
+      return { ok: true };
     } catch (error) {
-      Alert.alert('To‘lov saqlanmadi', error.message || 'To‘lov holatini o‘zgartirib bo‘lmadi.');
+      return { ok: false, error: error.message || 'To‘lov holatini o‘zgartirib bo‘lmadi.' };
     }
+  };
+
+  const openPayments = (returnScreen) => {
+    setPaymentsBackScreen(returnScreen);
+    setScreen('payments');
   };
 
   const sendQueuedSms = async (item) => {
@@ -440,11 +456,12 @@ function LesaApp({ db }) {
         {screen === 'home' && (
           <Dashboard
             rentals={active}
-            pendingRentals={rentals.filter((rental) => pendingPaymentItems(rental).length > 0)}
+            pendingRentals={pendingRentals}
             refreshing={refreshing}
             onRefresh={() => load()}
             onNew={() => setNewOpen(true)}
             onRental={setSelected}
+            onPayments={() => openPayments('home')}
             installAvailable={Boolean(installPrompt)}
             installCapabilityChecked={installCapabilityChecked}
             installed={appInstalled}
@@ -459,11 +476,12 @@ function LesaApp({ db }) {
         {screen === 'history' && (
           <History rentals={history} refreshing={refreshing} onRefresh={() => load()} onReceipt={(rental) => setReceipt({ rental, context: { type: 'final' } })} />
         )}
-        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} apkUrl={apkUrl} onSaveApkUrl={saveApkUrl} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
+        {screen === 'payments' && <Payments rentals={pendingRentals} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen(paymentsBackScreen)} onPay={confirmPaid} onRental={setSelected} />}
+        {screen === 'settings' && <Settings channel={channel} onChange={changeChannel} apkUrl={apkUrl} onSaveApkUrl={saveApkUrl} onPayments={() => openPayments('settings')} paymentPendingCount={pendingPaymentCount} onInventory={() => setScreen('inventory')} onSmsQueue={() => setScreen('sms')} smsPendingCount={smsQueue.filter((item) => item.status === 'pending').length} onInstallApp={installApp} installAvailable={Boolean(installPrompt)} installed={appInstalled} remoteMode={usesRemoteDatabase} />}
         {screen === 'sms' && <SmsQueue items={smsQueue} sending={smsSending} onSend={sendQueuedSms} onSendAll={sendAllQueuedSms} onBack={() => setScreen('settings')} />}
         {screen === 'inventory' && <Inventory equipment={equipment} refreshing={refreshing} onRefresh={() => load()} onBack={() => setScreen('settings')} onAdd={() => setEquipmentEditor({ mode: 'create', item: null })} onEdit={(item) => setEquipmentEditor({ mode: 'edit', item })} onDelete={handleDeleteEquipment} />}
 
-        <BottomNav screen={screen} onChange={setScreen} />
+        <BottomNav screen={screen === 'payments' ? paymentsBackScreen : screen} onChange={setScreen} />
       </View>
 
       <NewRentalModal open={newOpen} equipment={equipment} onClose={() => setNewOpen(false)} onSubmit={submitRental} />
@@ -542,7 +560,7 @@ function statusTone(days) {
   return { color: C.neutral, background: '#F9FAFB', label: 'Yangi' };
 }
 
-function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRental, installAvailable, installCapabilityChecked, installed, isIos, apkUrl, onInstall, onInstallHelp, onDownloadApk }) {
+function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRental, onPayments, installAvailable, installCapabilityChecked, installed, isIos, apkUrl, onInstall, onInstallHelp, onDownloadApk }) {
   const [query, setQuery] = useState('');
   const filtered = rentals.filter((rental) => `${rental.customerName} ${rental.phone}`.toLowerCase().includes(query.toLowerCase()));
   const debt = rentals.reduce((total, rental) => total + currentDebt(rental), 0);
@@ -577,6 +595,7 @@ function Dashboard({ rentals, pendingRentals, refreshing, onRefresh, onNew, onRe
         {pendingRentals.length > 0 && <View style={s.pendingPanel}>
           <View style={s.pendingPanelHead}><View><Text style={s.pendingPanelTitle}>To‘lov kutilmoqda</Text><Text style={s.pendingPanelSub}>Buyum qaytdi, to‘lov hali tasdiqlanmagan</Text></View><Text style={s.pendingPanelTotal}>{formatMoney(pendingTotal)}</Text></View>
           {pendingRentals.map((rental) => <Pressable key={rental.id} style={s.pendingPanelRow} onPress={() => onRental(rental)}><View style={s.flex}><Text style={s.customerName}>{rental.customerName}</Text><Text style={s.phone}>{quantityOf(pendingPaymentItems(rental))} dona qaytgan anjom</Text></View><Text style={s.pendingPanelAmount}>{formatMoney(pendingPaymentTotal(rental))}</Text></Pressable>)}
+          <Pressable style={s.pendingPanelAction} onPress={onPayments}><Text style={s.pendingPanelActionText}>To‘lovlarni tasdiqlash</Text><Text style={s.pendingPanelActionArrow}>›</Text></Pressable>
         </View>}
         <View style={s.sectionTitleRow}><View><Text style={s.sectionTitle}>Faol mijozlar</Text><Text style={s.sectionSub}>Qaytarilishi kutilayotgan ijaralar</Text></View><Text style={s.resultCount}>{filtered.length} ta</Text></View>
         <View style={s.searchBox}><Text style={s.searchIcon}>⌕</Text><TextInput value={query} onChangeText={setQuery} placeholder="Mijoz yoki telefon..." placeholderTextColor="#99A39F" style={s.searchInput} /></View>
@@ -789,7 +808,126 @@ function SmsQueue({ items, sending, onSend, onSendAll, onBack }) {
   </ScrollView>;
 }
 
-function Settings({ channel, onChange, apkUrl, onSaveApkUrl, onInventory, onSmsQueue, smsPendingCount, onInstallApp, installAvailable, installed, remoteMode }) {
+function Payments({ rentals, refreshing, onRefresh, onBack, onPay, onRental }) {
+  const [paymentTarget, setPaymentTarget] = useState(null);
+  const [payingItemId, setPayingItemId] = useState(null);
+  const [paymentError, setPaymentError] = useState('');
+  const paymentCount = rentals.reduce((total, rental) => total + pendingPaymentItems(rental).length, 0);
+  const paymentTotal = rentals.reduce((total, rental) => total + pendingPaymentTotal(rental), 0);
+
+  const openConfirmation = (rental, item) => {
+    setPaymentError('');
+    setPaymentTarget({ rental, item });
+  };
+
+  const closeConfirmation = () => {
+    if (payingItemId) return;
+    setPaymentError('');
+    setPaymentTarget(null);
+  };
+
+  const confirmPayment = async () => {
+    if (!paymentTarget || payingItemId) return;
+    setPayingItemId(paymentTarget.item.id);
+    setPaymentError('');
+    try {
+      const result = await onPay(paymentTarget.item.id);
+      if (result?.ok) {
+        setPaymentTarget(null);
+      } else {
+        setPaymentError(result?.error || 'To‘lov holatini saqlab bo‘lmadi.');
+      }
+    } catch (error) {
+      setPaymentError(error.message || 'To‘lov holatini saqlab bo‘lmadi.');
+    } finally {
+      setPayingItemId(null);
+    }
+  };
+
+  return <>
+    <ScrollView
+      style={s.screen}
+      contentContainerStyle={s.screenContent}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green} />}
+    >
+      <View style={s.inventoryTopRow}>
+        <Pressable style={s.inventoryBackButton} onPress={onBack} hitSlop={8}><Text style={s.inventoryBackText}>‹</Text></Pressable>
+        <Text style={s.inventoryTitle}>To‘lovlar</Text>
+        <View style={{ width: 40 }} />
+      </View>
+      <Text style={s.inventorySubtitle}>Qaytarilgan, lekin hali to‘langani tasdiqlanmagan anjomlar</Text>
+
+      <View style={s.paymentMetricGrid}>
+        <View style={s.paymentMetricCard}>
+          <Text style={s.paymentMetricLabel}>KUTILAYOTGAN TO‘LOVLAR</Text>
+          <Text style={s.paymentMetricCount}>{paymentCount}</Text>
+          <Text style={s.paymentMetricHint}>tasdiqlanmagan hisob</Text>
+        </View>
+        <View style={[s.paymentMetricCard, s.paymentMetricTotalCard]}>
+          <Text style={s.paymentMetricLabel}>JAMI SUMMA</Text>
+          <Text style={s.paymentMetricTotal}>{formatMoney(paymentTotal)}</Text>
+          <Text style={s.paymentMetricHint}>muzlatilgan qarz</Text>
+        </View>
+      </View>
+
+      {refreshing && <View style={s.paymentLoading}><ActivityIndicator color={C.green} /><Text style={s.paymentLoadingText}>To‘lovlar yangilanmoqda...</Text></View>}
+
+      {rentals.map((rental) => {
+        const items = pendingPaymentItems(rental);
+        return <View key={rental.id} style={s.paymentGroupCard}>
+          <View style={s.paymentCustomerHead}>
+            <View style={s.avatar}><Text style={s.avatarText}>{initials(rental.customerName)}</Text></View>
+            <View style={s.flex}><Text style={s.customerName}>{rental.customerName}</Text><Text style={s.phone}>{rental.phone} · {items.length} ta to‘lov</Text></View>
+            <Pressable style={s.paymentCustomerButton} onPress={() => onRental(rental)}><Text style={s.paymentCustomerButtonText}>Ko‘rish</Text></Pressable>
+          </View>
+          {items.map((item) => <View key={item.id} style={s.paymentItemRow}>
+            <View style={s.paymentItemTop}>
+              <View style={s.flex}>
+                <Text style={s.paymentItemName}>{item.name} × {item.quantity}</Text>
+                <Text style={s.paymentItemMeta}>Qaytdi: {formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun</Text>
+              </View>
+              <Text style={s.paymentItemAmount}>{formatMoney(lineAmount(rental, item))}</Text>
+            </View>
+            <Pressable style={s.paymentApproveButton} onPress={() => openConfirmation(rental, item)}>
+              <MaterialCommunityIcons name="cash-check" size={25} color={C.white} />
+              <Text style={s.paymentApproveText}>To‘lovni tasdiqlash</Text>
+            </Pressable>
+          </View>)}
+        </View>;
+      })}
+
+      {!rentals.length && !refreshing && <Empty title="Tasdiqlanmagan to‘lov yo‘q" text="Qaytarilgan anjom uchun to‘lov kutilsa, u shu sahifada ko‘rinadi." />}
+    </ScrollView>
+    <PaymentConfirmModal target={paymentTarget} busy={Boolean(payingItemId)} error={paymentError} onClose={closeConfirmation} onConfirm={confirmPayment} />
+  </>;
+}
+
+function PaymentConfirmModal({ target, busy, error, onClose, onConfirm }) {
+  const amount = target ? lineAmount(target.rental, target.item) : 0;
+  return <Modal visible={Boolean(target)} transparent animationType="fade" onRequestClose={onClose}>
+    <View style={s.paymentConfirmOverlay}>
+      <View style={s.paymentConfirmCard}>
+        <View style={s.paymentConfirmIcon}><MaterialCommunityIcons name="cash-check" size={32} color={C.successDark} /></View>
+        <Text style={s.paymentConfirmTitle}>To‘lovni tasdiqlaysizmi?</Text>
+        <Text style={s.paymentConfirmText}>Pul haqiqatan olingan bo‘lsa tasdiqlang. Bu anjom “To‘landi” holatiga o‘tadi.</Text>
+        {target && <View style={s.paymentConfirmSummary}>
+          <Text style={s.paymentConfirmCustomer}>{target.rental.customerName}</Text>
+          <Text style={s.paymentConfirmItem}>{target.item.name} × {target.item.quantity}</Text>
+          <Text style={s.paymentConfirmAmount}>{formatMoney(amount)}</Text>
+        </View>}
+        {error ? <View style={s.paymentConfirmError}><Text style={s.paymentConfirmErrorText}>{error}</Text></View> : null}
+        <View style={s.paymentConfirmActions}>
+          <Pressable disabled={busy} style={[s.paymentCancelButton, busy && s.paymentButtonDisabled]} onPress={onClose}><Text style={s.paymentCancelText}>Bekor qilish</Text></Pressable>
+          <Pressable disabled={busy} style={[s.paymentConfirmButton, busy && s.paymentButtonDisabled]} onPress={onConfirm}>
+            {busy ? <ActivityIndicator color={C.white} /> : <Text style={s.paymentConfirmButtonText}>Ha, to‘landi</Text>}
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  </Modal>;
+}
+
+function Settings({ channel, onChange, apkUrl, onSaveApkUrl, onPayments, paymentPendingCount, onInventory, onSmsQueue, smsPendingCount, onInstallApp, installAvailable, installed, remoteMode }) {
   const [apkDraft, setApkDraft] = useState(apkUrl);
   const [apkSaving, setApkSaving] = useState(false);
   const [apkStatus, setApkStatus] = useState(null);
@@ -846,6 +984,12 @@ function Settings({ channel, onChange, apkUrl, onSaveApkUrl, onInventory, onSmsQ
         </View>
       </>}
       <View style={s.settingsCard}><Text style={s.settingsTitle}>Ma’lumotlar</Text><InfoRow label="Saqlash" value={storageLabel} /><InfoRow label="Hisoblash" value="Real-time, cron ishlatilmaydi" /><InfoRow label="Versiya" value="1.0.0 MVP" /></View>
+      <Pressable style={[s.inventoryLink, paymentPendingCount > 0 && s.paymentMenuLinkActive]} onPress={onPayments}>
+        <View style={s.paymentMenuIcon}><MaterialCommunityIcons name="cash-check" size={28} color={C.green2} /></View>
+        <View style={s.flex}><Text style={s.settingsTitle}>To‘lovlarni tasdiqlash</Text><Text style={s.settingsText}>{paymentPendingCount ? `${paymentPendingCount} ta to‘lov tasdiqlanishi kutilmoqda` : 'Hozir tasdiqlanmagan to‘lov yo‘q'}</Text></View>
+        {paymentPendingCount > 0 && <View style={s.paymentMenuBadge}><Text style={s.paymentMenuBadgeText}>{paymentPendingCount}</Text></View>}
+        <Text style={s.inventoryArrow}>›</Text>
+      </Pressable>
       <Pressable style={s.inventoryLink} onPress={onInventory}><View><Text style={s.settingsTitle}>Ombor jadvali</Text><Text style={s.settingsText}>Anjomlar va faol ijaradagi sonlarni ko‘rish</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
       <Pressable style={s.inventoryLink} onPress={onSmsQueue}><View><Text style={s.settingsTitle}>SMS navbati</Text><Text style={s.settingsText}>{smsPendingCount ? `${smsPendingCount} ta xabar yuborishni kutmoqda` : 'Yuborilgan va kutilayotgan xabarlar'}</Text></View><Text style={s.inventoryArrow}>›</Text></Pressable>
       <View style={s.note}><Text style={s.noteTitle}>Eslatma</Text><Text style={s.noteText}>{storageNote} SMS/Telegram/WhatsApp yuborish uchun tegishli API ulanishi kerak.</Text></View>
@@ -972,8 +1116,41 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
   const pendingItems = rental ? pendingPaymentItems(rental) : [];
   const paidItems = rental ? paidReturnedItems(rental) : [];
   const activeQuantity = quantityOf(activeItems);
+  const [paymentTarget, setPaymentTarget] = useState(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
 
-  return <Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
+  useEffect(() => {
+    setPaymentTarget(null);
+    setPaymentBusy(false);
+    setPaymentError('');
+  }, [rental?.id]);
+
+  const confirmDetailPayment = async () => {
+    if (!paymentTarget || paymentBusy) return;
+    setPaymentBusy(true);
+    setPaymentError('');
+    try {
+      const result = await onPay(paymentTarget.item.id);
+      if (result?.ok) {
+        setPaymentTarget(null);
+      } else {
+        setPaymentError(result?.error || 'To‘lov holatini saqlab bo‘lmadi.');
+      }
+    } catch (error) {
+      setPaymentError(error.message || 'To‘lov holatini saqlab bo‘lmadi.');
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
+  const closeDetailPayment = () => {
+    if (paymentBusy) return;
+    setPaymentTarget(null);
+    setPaymentError('');
+  };
+
+  return <><Modal visible={Boolean(rental)} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>{rental && <SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.modalContent}>
     <ModalHeader title={rental.customerName} subtitle={rental.phone} onClose={onClose} />
     <View style={[s.detailSummary, { backgroundColor: C.redSoft, borderColor: C.redLine }]}>
       <Text style={[s.detailLabel, { color: C.redDark }]}>JORIY JAMI QARZ</Text>
@@ -992,7 +1169,7 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
       <View style={s.detailSectionHeader}><Text style={s.itemsTitle}>To‘lov kutilmoqda</Text><Text style={[s.paidSectionTotal, { color: C.orange }]}>{formatMoney(pendingPaymentTotal(rental))}</Text></View>
       {pendingItems.map((item) => <View key={item.id} style={[s.returnHistoryItem, s.pendingPaymentCard]}>
         <View style={s.detailItemTop}><View style={s.flex}><Text style={s.detailItemName}>↩ {item.name} × {item.quantity}</Text><Text style={s.detailItemSub}>{formatDate(item.returnedAt, true)} · {dayCount(item.startedAt || rental.startedAt, item.returnedAt)} kun · to‘lov kutilmoqda</Text></View><Text style={[s.returnHistoryAmount, { color: C.orange }]}>{formatMoney(lineAmount(rental, item))}</Text></View>
-        <View style={s.pendingPaymentFooter}><Text style={[s.paidBadgeText, { color: C.orange }]}>BUYUM QAYTDI</Text><Pressable style={s.paidConfirmButton} onPress={() => onPay(item.id)}><Text style={s.paidConfirmText}>To‘landi</Text></Pressable></View>
+        <View style={s.pendingPaymentFooter}><Text style={[s.paidBadgeText, { color: C.green2 }]}>BUYUM QAYTDI</Text><Pressable style={s.paidConfirmButton} onPress={() => { setPaymentError(''); setPaymentTarget({ rental, item }); }}><Text style={s.paidConfirmText}>To‘landi</Text></Pressable></View>
       </View>)}
     </>}
 
@@ -1006,7 +1183,7 @@ function RentalDetail({ rental, onClose, onEdit, onPay, onReceipt }) {
 
     <Pressable style={s.returnButton} onPress={onEdit}><Text style={s.returnButtonText}>Tahrirlash</Text></Pressable>
     <Pressable style={s.receiptButton} onPress={() => onReceipt(rental)}><Text style={s.receiptButtonText}>▧  {isClosed(rental) ? 'Yakuniy chekni ko‘rish' : 'Elektron chekni ko‘rish'}</Text></Pressable>
-  </ScrollView></SafeAreaView>}</Modal>;
+  </ScrollView></SafeAreaView>}</Modal><PaymentConfirmModal target={paymentTarget} busy={paymentBusy} error={paymentError} onClose={closeDetailPayment} onConfirm={confirmDetailPayment} /></>;
 }
 
 function RentalEditModal({ target, equipment, onClose, onSubmit }) {
@@ -1177,6 +1354,13 @@ const s = StyleSheet.create({
   historyCard: { padding: 14, backgroundColor: C.white, borderRadius: 12, borderWidth: 1, borderColor: C.line }, historyTop: { flexDirection: 'row', alignItems: 'center' }, doneBadge: { borderRadius: 10, backgroundColor: C.greenSoft, paddingHorizontal: 8, paddingVertical: 5 }, doneText: { fontSize: 20, color: C.green2, fontWeight: '400' }, historyBottom: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, historyItems: { color: C.muted, fontSize: 20, fontWeight: '400' }, historyTotal: { color: C.ink, fontWeight: '500', fontSize: 20 },
   empty: { alignItems: 'center', justifyContent: 'center', paddingVertical: 50, paddingHorizontal: 28 }, emptyIcon: { width: 54, height: 54, borderRadius: 27, backgroundColor: C.greenSoft, alignItems: 'center', justifyContent: 'center', marginBottom: 13 }, emptyIconText: { fontSize: 29.8, color: C.green }, emptyTitle: { color: C.ink, fontWeight: '500', fontSize: 20.8 }, emptyText: { color: C.muted, fontSize: 20, fontWeight: '400', textAlign: 'center', lineHeight: 24, marginTop: 6 }, emptyButton: { backgroundColor: C.green, paddingHorizontal: 18, paddingVertical: 11, borderRadius: 10, marginTop: 16 }, emptyButtonText: { color: C.white, fontWeight: '500', fontSize: 20 },
   settingsCard: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 18, marginBottom: 12 }, settingsTitle: { fontSize: 20, fontWeight: '500', color: C.ink }, settingsText: { fontSize: 20, color: C.muted, fontWeight: '400', lineHeight: 24, marginTop: 6, marginBottom: 14 }, channelGrid: { flexDirection: 'row', gap: 8 }, channel: { flex: 1, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, paddingVertical: 14, borderRadius: 12, alignItems: 'center' }, channelActive: { backgroundColor: C.green, borderColor: C.green }, channelText: { color: C.muted, fontSize: 20, fontWeight: '400' }, channelTextActive: { color: C.white }, infoRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.line }, infoLabel: { color: C.muted, fontSize: 20, fontWeight: '400' }, infoValue: { color: C.ink, fontSize: 20, fontWeight: '400', maxWidth: '62%', textAlign: 'right' }, note: { borderRadius: 12, padding: 14, backgroundColor: C.orangeSoft }, noteTitle: { color: C.green2, fontWeight: '500', fontSize: 20 }, noteText: { color: C.muted, fontSize: 20, fontWeight: '400', lineHeight: 24, marginTop: 5 },
+  pendingPanel: { backgroundColor: C.white, borderWidth: 1, borderColor: C.blueLine, borderRadius: 12, padding: 14, marginBottom: 18 }, pendingPanelHead: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, pendingPanelTitle: { color: C.green2, fontSize: 22, fontWeight: '500' }, pendingPanelSub: { color: C.muted, fontSize: 20, lineHeight: 25, marginTop: 4 }, pendingPanelTotal: { color: C.green2, fontSize: 22, fontWeight: '500' }, pendingPanelRow: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: C.blueLine, paddingTop: 10, marginTop: 10, gap: 10 }, pendingPanelAmount: { color: C.green2, fontSize: 20, fontWeight: '500' }, pendingPanelAction: { minHeight: 52, borderRadius: 10, backgroundColor: C.green, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 14, paddingHorizontal: 16 }, pendingPanelActionText: { color: C.white, fontSize: 20, fontWeight: '500' }, pendingPanelActionArrow: { color: C.white, fontSize: 30, fontWeight: '400', marginLeft: 8, marginTop: -2 },
+  pendingPaymentCard: { backgroundColor: C.blueSoft, borderColor: C.blueLine }, pendingPaymentFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 9 }, paidConfirmButton: { borderRadius: 10, backgroundColor: C.success, paddingHorizontal: 15, paddingVertical: 10 }, paidConfirmText: { color: C.white, fontSize: 20, fontWeight: '500' },
+  paymentMenuLinkActive: { borderColor: C.blueLine, backgroundColor: C.blueSoft }, paymentMenuIcon: { width: 48, height: 48, borderRadius: 12, backgroundColor: C.white, borderWidth: 1, borderColor: C.blueLine, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, paymentMenuBadge: { minWidth: 34, height: 34, borderRadius: 17, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 7, marginLeft: 8 }, paymentMenuBadgeText: { color: C.white, fontSize: 20, fontWeight: '500' },
+  paymentMetricGrid: { flexDirection: 'row', gap: 10, marginBottom: 14 }, paymentMetricCard: { flex: 1, minHeight: 126, padding: 15, borderRadius: 12, borderWidth: 1, borderColor: C.line, backgroundColor: C.white }, paymentMetricTotalCard: { backgroundColor: C.blueSoft, borderColor: C.blueLine }, paymentMetricLabel: { color: C.muted, fontSize: 20, lineHeight: 24, fontWeight: '400' }, paymentMetricCount: { color: C.ink, fontSize: 32, fontWeight: '500', marginTop: 8 }, paymentMetricTotal: { color: C.green2, fontSize: 22, fontWeight: '500', marginTop: 8 }, paymentMetricHint: { color: C.muted, fontSize: 20, lineHeight: 24, fontWeight: '400', marginTop: 4 }, paymentLoading: { minHeight: 54, borderRadius: 10, borderWidth: 1, borderColor: C.blueLine, backgroundColor: C.blueSoft, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginBottom: 12 }, paymentLoadingText: { color: C.green2, fontSize: 20, fontWeight: '400' },
+  paymentGroupCard: { backgroundColor: C.white, borderRadius: 14, borderWidth: 1, borderColor: C.line, padding: 16, marginBottom: 12 }, paymentCustomerHead: { flexDirection: 'row', alignItems: 'center', paddingBottom: 13 }, paymentCustomerButton: { minHeight: 44, borderRadius: 10, borderWidth: 1, borderColor: C.blueLine, backgroundColor: C.white, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 13, marginLeft: 8 }, paymentCustomerButtonText: { color: C.green2, fontSize: 20, fontWeight: '500' }, paymentItemRow: { borderTopWidth: 1, borderTopColor: C.line, paddingTop: 14, marginTop: 2 }, paymentItemTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, paymentItemName: { color: C.ink, fontSize: 20, fontWeight: '500' }, paymentItemMeta: { color: C.muted, fontSize: 20, lineHeight: 25, fontWeight: '400', marginTop: 4 }, paymentItemAmount: { color: C.redDark, fontSize: 20, fontWeight: '500', textAlign: 'right' }, paymentApproveButton: { minHeight: 50, borderRadius: 10, backgroundColor: C.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 12, marginBottom: 14, paddingHorizontal: 14 }, paymentApproveText: { color: C.white, fontSize: 20, fontWeight: '500' },
+  paymentConfirmOverlay: { flex: 1, backgroundColor: 'rgba(17,24,39,.42)', alignItems: 'center', justifyContent: 'center', padding: 20 }, paymentConfirmCard: { width: '100%', maxWidth: 460, backgroundColor: C.white, borderRadius: 16, borderWidth: 1, borderColor: C.line, padding: 20 }, paymentConfirmIcon: { width: 58, height: 58, borderRadius: 16, backgroundColor: C.greenSoft, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, paymentConfirmTitle: { color: C.ink, fontSize: 25, fontWeight: '500' }, paymentConfirmText: { color: C.muted, fontSize: 20, lineHeight: 26, fontWeight: '400', marginTop: 8 }, paymentConfirmSummary: { borderRadius: 12, borderWidth: 1, borderColor: C.blueLine, backgroundColor: C.blueSoft, padding: 14, marginTop: 16 }, paymentConfirmCustomer: { color: C.ink, fontSize: 20, fontWeight: '500' }, paymentConfirmItem: { color: C.muted, fontSize: 20, lineHeight: 25, fontWeight: '400', marginTop: 5 }, paymentConfirmAmount: { color: C.redDark, fontSize: 24, fontWeight: '500', marginTop: 8 }, paymentConfirmError: { borderRadius: 10, borderWidth: 1, borderColor: C.redLine, backgroundColor: C.redSoft, padding: 12, marginTop: 12 }, paymentConfirmErrorText: { color: C.redDark, fontSize: 20, lineHeight: 25, fontWeight: '400' }, paymentConfirmActions: { flexDirection: 'row', gap: 10, marginTop: 18 }, paymentCancelButton: { flex: 1, minHeight: 54, borderRadius: 10, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 }, paymentCancelText: { color: C.ink, fontSize: 20, fontWeight: '400' }, paymentConfirmButton: { flex: 1, minHeight: 54, borderRadius: 10, backgroundColor: C.success, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 }, paymentConfirmButtonText: { color: C.white, fontSize: 20, fontWeight: '500', textAlign: 'center' }, paymentButtonDisabled: { opacity: .6 },
+  smsQueueCard: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, marginTop: 10 }, smsQueueHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, smsQueueStatus: { fontSize: 20, fontWeight: '500', letterSpacing: .3 }, smsQueueMessage: { color: C.ink, fontSize: 20, lineHeight: 26, marginTop: 10 }, smsQueueError: { color: C.redDark, fontSize: 20, lineHeight: 25, marginTop: 8 }, smsQueueSend: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.green, paddingHorizontal: 16, paddingVertical: 10, marginTop: 12 }, smsQueueSendText: { color: C.white, fontSize: 20, fontWeight: '500' },
   bottomNav: { position: 'absolute', left: 12, right: 12, bottom: Platform.OS === 'ios' ? 10 : 12, height: 98, borderRadius: 16, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: 4, shadowColor: '#1D4ED8', shadowOpacity: .06, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 2 }, navButton: { flex: 1, minHeight: 82, alignItems: 'center', justifyContent: 'center', gap: 3, paddingVertical: 7, paddingHorizontal: 2, borderRadius: 13 }, navButtonActive: { backgroundColor: C.blueSoft }, navIconWrap: { width: 44, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, navIconWrapActive: { backgroundColor: '#DBEAFE' }, navIcon: { color: C.muted, fontSize: 31.1 }, navLabel: { color: C.muted, fontSize: 20, fontWeight: '400', textAlign: 'center' }, navActive: { color: C.green, fontWeight: '500' },
   modalPage: { flex: 1, backgroundColor: C.white }, modalContent: { padding: 20, paddingBottom: 42 }, modalHeader: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 20 }, modalTitle: { color: C.ink, fontSize: 28.6, fontWeight: '500' }, modalSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, closeButton: { width: 42, height: 42, borderRadius: 10, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' }, closeText: { color: C.ink, fontSize: 28.6, fontWeight: '400', marginTop: -2 }, field: { marginBottom: 14 }, fieldLabel: { color: C.muted, fontSize: 20, fontWeight: '400', letterSpacing: .7, marginBottom: 7 }, input: { height: 56, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, paddingHorizontal: 16, fontSize: 20, fontWeight: '400', color: C.ink }, itemsHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 5, marginBottom: 10 }, itemsTitle: { fontSize: 20.8, fontWeight: '500', color: C.ink }, itemsCount: { color: C.muted, fontSize: 20, fontWeight: '400' }, itemEditor: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 16, marginBottom: 9 }, itemEditorTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 9 }, itemNumber: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .7 }, removeText: { color: C.redDark, fontSize: 20, fontWeight: '400' }, suggestions: { gap: 6, paddingVertical: 8 }, suggestion: { borderRadius: 10, paddingVertical: 6, paddingHorizontal: 10, backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: C.line }, suggestionActive: { backgroundColor: C.greenSoft, borderColor: C.blueLine }, suggestionText: { fontSize: 20, color: C.muted, fontWeight: '400' }, suggestionTextActive: { color: C.green2 }, twoColumns: { flexDirection: 'row', gap: 10, marginTop: 2 }, addItem: { height: 52, borderRadius: 12, borderWidth: 1, borderStyle: 'dashed', borderColor: C.blueLine, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, addItemText: { color: C.green2, fontSize: 20, fontWeight: '400' }, dailyTotal: { padding: 14, borderRadius: 12, backgroundColor: C.orangeSoft, borderWidth: 1, borderColor: C.blueLine, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }, dailyLabel: { color: C.muted, fontSize: 20, fontWeight: '400' }, dailyValue: { color: C.green2, fontSize: 20.8, fontWeight: '500' }, mainButton: { minHeight: 56, backgroundColor: C.green, borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 }, mainButtonText: { color: C.white, fontSize: 20, fontWeight: '500' },
   detailSummary: { backgroundColor: C.orangeSoft, borderWidth: 1, borderColor: C.blueLine, borderRadius: 14, padding: 20, marginBottom: 18 }, detailLabel: { color: C.green2, fontSize: 20, letterSpacing: 1, fontWeight: '400' }, detailTotal: { color: C.green2, fontSize: 35.1, fontWeight: '500', marginTop: 6 }, detailDate: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 8 }, detailSectionHeader: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4, marginBottom: 1 }, detailSectionCount: { color: C.muted, fontSize: 20, fontWeight: '400' }, paidSectionTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, detailItem: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 16, marginTop: 8 }, detailItemTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, detailItemName: { color: C.ink, fontSize: 20, fontWeight: '500' }, detailItemSub: { color: C.muted, fontSize: 20, fontWeight: '400', marginTop: 4 }, detailItemTotal: { color: C.green2, fontSize: 20, fontWeight: '400' }, returnButton: { borderRadius: 12, backgroundColor: C.green, alignItems: 'center', paddingVertical: 15, marginTop: 12 }, returnButtonText: { color: C.white, fontWeight: '500', fontSize: 20 }, returnHistoryItem: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 13, marginTop: 8 }, returnHistoryAmount: { color: C.green2, fontSize: 20, fontWeight: '400' }, paidBadge: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.greenSoft, paddingHorizontal: 8, paddingVertical: 4, marginTop: 9 }, paidBadgeText: { color: C.green2, fontSize: 20, fontWeight: '400', letterSpacing: .4 }, receiptButton: { borderRadius: 10, borderWidth: 1, borderColor: C.green, alignItems: 'center', paddingVertical: 12, marginTop: 15 }, receiptButtonText: { color: C.green2, fontWeight: '500', fontSize: 20 },
@@ -1211,7 +1395,4 @@ const installS = StyleSheet.create({
   apkStatusError: { color: C.redDark },
   apkSaveButton: { minHeight: 52, borderRadius: 10, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center', marginTop: 12, paddingHorizontal: 16 },
   apkSaveText: { color: C.white, fontSize: 20, fontWeight: '500' },
-  pendingPanel: { backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FED7AA', borderRadius: 12, padding: 14, marginBottom: 18 }, pendingPanelHead: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, pendingPanelTitle: { color: '#9A3412', fontSize: 22, fontWeight: '500' }, pendingPanelSub: { color: '#C2410C', fontSize: 18, marginTop: 4 }, pendingPanelTotal: { color: '#C2410C', fontSize: 22, fontWeight: '500' }, pendingPanelRow: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#FED7AA', paddingTop: 10, marginTop: 10, gap: 10 }, pendingPanelAmount: { color: '#C2410C', fontSize: 20, fontWeight: '500' },
-  pendingPaymentCard: { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }, pendingPaymentFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 9 }, paidConfirmButton: { borderRadius: 10, backgroundColor: C.orange, paddingHorizontal: 14, paddingVertical: 8 }, paidConfirmText: { color: C.white, fontSize: 18, fontWeight: '500' },
-  smsQueueCard: { backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, marginTop: 10 }, smsQueueHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, smsQueueStatus: { fontSize: 16, fontWeight: '500', letterSpacing: .3 }, smsQueueMessage: { color: C.ink, fontSize: 19, lineHeight: 26, marginTop: 10 }, smsQueueError: { color: C.redDark, fontSize: 18, marginTop: 8 }, smsQueueSend: { alignSelf: 'flex-start', borderRadius: 10, backgroundColor: C.green, paddingHorizontal: 16, paddingVertical: 9, marginTop: 12 }, smsQueueSendText: { color: C.white, fontSize: 18, fontWeight: '500' },
 });
